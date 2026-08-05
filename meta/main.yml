@@ -1,0 +1,29 @@
+---
+galaxy_info:
+  role_name: superset
+  author: chadek
+  description: ansible role to install and configure Apache Superset in production (gunicorn + celery, PostgreSQL and Valkey)
+  company: Green-house
+  license: license GPL-3.0-only
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    # The galaxy schema bundled with ansible-lint knows no release more recent
+    # than these two; trixie, noble and resolute are supported all the same.
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+
+  galaxy_tags:
+    - superset
+    - apache
+    - analytics
+    - bi
+    - dashboard
+    - gunicorn
+    - celery
+
+dependencies: []

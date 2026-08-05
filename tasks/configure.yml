@@ -1,0 +1,69 @@
+---
+# The valkey package ships /etc/valkey as 0770 valkey:valkey, which the superset
+# user cannot even traverse, so the CA of the local instance is copied here. The
+# configuration directory is 0750 root:superset: the copy is readable by the
+# superset processes and by nothing else.
+- name: Superset | Deploy the CA of the local valkey for superset to read
+  ansible.builtin.copy:
+    src: "{{ superset_valkey_tls_dir }}/ca.crt"
+    dest: "{{ superset_valkey_ca_cert_file }}"
+    remote_src: true
+    owner: root
+    group: "{{ superset_user.group }}"
+    mode: "0640"
+  when: _superset_valkey_tls_local | bool
+  notify: Restart superset
+
+# A CA the superset user cannot open is reported by redis-py and by psycopg2 as a
+# connection error ("Error 13 connecting to 127.0.0.1:6379. Permission denied.",
+# errno 13 from the failed open, no file mentioned), and only once a dashboard is
+# used. Both drivers read it as the superset user, so the answer comes from su.
+- name: Superset | Probe the TLS trust material as the superset user
+  ansible.builtin.command:
+    argv:
+      - su
+      - -s
+      - /bin/sh
+      - -c
+      - "test -r '{{ item }}'"
+      - "{{ superset_user.name }}"
+  loop: "{{ [_superset_valkey_ca_cert, _superset_db_ca_cert] | select | list }}"
+  register: _superset_ca_probe
+  changed_when: false
+  failed_when: false
+
+- name: Superset | Check the TLS trust material is readable by the superset user
+  ansible.builtin.assert:
+    that:
+      - (_superset_ca_probe.results | default([]) | rejectattr('rc', 'eq', 0) | list | length) == 0
+    fail_msg: >-
+      {{ _superset_ca_probe.results | default([]) | rejectattr('rc', 'eq', 0)
+         | map(attribute='item') | join(', ') }} cannot be read by the
+      {{ superset_user.name }} user: every directory on the way needs its traverse
+      bit and the file itself has to be readable. Do not relax the permissions of
+      a directory owned by a package (/etc/valkey is 0770 valkey:valkey, and a
+      package upgrade puts it back); copy the CA somewhere else instead, for
+      instance /usr/local/share/ca-certificates.
+
+- name: Superset | Deploy the configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: "{{ superset_user.group }}"
+    mode: "0640"
+  loop:
+    - { src: superset_config.py.j2, dest: "{{ superset_config_file }}" }
+    - { src: superset.env.j2, dest: "{{ superset_env_file }}" }
+    - { src: gunicorn.conf.py.j2, dest: "{{ superset_dir.conf }}/gunicorn.conf.py" }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Restart superset
+
+- name: Superset | Deploy the logrotate configuration
+  ansible.builtin.template:
+    src: logrotate.j2
+    dest: /etc/logrotate.d/superset
+    owner: root
+    group: root
+    mode: "0644"

@@ -1,0 +1,6 @@
+---
+- name: Converge | Superset against managed PostgreSQL and Valkey
+  hosts: superset_app
+  become: true
+  roles:
+    - role: ansible-role-superset

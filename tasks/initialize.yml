@@ -1,0 +1,73 @@
+---
+- name: Superset | Wait for the metadata database to accept connections
+  ansible.builtin.wait_for:
+    host: "{{ superset_db_host }}"
+    port: "{{ superset_db_port | int }}"
+    timeout: 120
+
+- name: Superset | Wait for valkey to accept connections
+  ansible.builtin.wait_for:
+    host: "{{ superset_valkey_host }}"
+    port: "{{ superset_valkey_port | int }}"
+    timeout: 60
+  when: superset_celery.enabled | bool
+
+# The schema migration, the admin user and the roles must be done once and only
+# once for the whole cluster, hence the primary election.
+- name: Superset | Bootstrap the instance from the primary
+  when: superset_is_primary | bool
+  environment: "{{ superset_environment_full }}"
+  block:
+    - name: Superset | Upgrade the metadata database schema
+      ansible.builtin.command: "{{ superset_bin }} db upgrade"
+      register: _superset_db_upgrade
+      changed_when: "'Running upgrade' in _superset_db_upgrade.stderr"
+
+    - name: Superset | List existing admin users
+      ansible.builtin.command: "{{ superset_bin }} fab list-users"
+      register: _superset_users
+      changed_when: false
+
+    - name: Superset | Create the admin user
+      ansible.builtin.command:
+        argv:
+          - "{{ superset_bin }}"
+          - fab
+          - create-admin
+          - --username
+          - "{{ superset_admin.username }}"
+          - --firstname
+          - "{{ superset_admin.firstname }}"
+          - --lastname
+          - "{{ superset_admin.lastname }}"
+          - --email
+          - "{{ superset_admin.email }}"
+          - --password
+          - "{{ superset_admin.password }}"
+      register: _superset_create_admin
+      changed_when: _superset_create_admin.rc == 0
+      no_log: true
+      when: superset_admin.username not in _superset_users.stdout
+
+    - name: Superset | Initialize roles and permissions
+      ansible.builtin.command: "{{ superset_bin }} init"
+      changed_when: false
+
+    # The marker is written by the same shell, so it only appears once the load
+    # really succeeded.
+    - name: Superset | Load the example dashboards
+      ansible.builtin.shell:
+        cmd: "{{ superset_bin }} load_examples && touch {{ superset_dir.home }}/.examples_loaded"
+        creates: "{{ superset_dir.home }}/.examples_loaded"
+      when: superset_load_examples | bool
+
+- name: Superset | Give back the runtime directories to the superset user
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ superset_user.name }}"
+    group: "{{ superset_user.group }}"
+    recurse: true
+  loop:
+    - "{{ superset_dir.home }}"
+    - "{{ superset_dir.log }}"

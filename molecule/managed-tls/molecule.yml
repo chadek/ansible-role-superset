@@ -1,0 +1,98 @@
+---
+# Stands in for the target production shape: PostgreSQL and Valkey are both
+# managed services, reachable only over TLS, on a host the role does not touch.
+# The application host therefore holds no state at all.
+dependency:
+  name: galaxy
+  options:
+    role-file: requirements.yml
+driver:
+  name: docker
+platforms:
+  - name: superset-data
+    image: "geerlingguy/docker-debian12-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    networks:
+      - name: superset-managed-molecule
+    groups:
+      - superset_data
+  - name: superset-app
+    image: "geerlingguy/docker-debian12-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    networks:
+      - name: superset-managed-molecule
+    groups:
+      - superset_app
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:${HOME}/.ansible/roles:${MOLECULE_EPHEMERAL_DIRECTORY}/roles"
+  inventory:
+    group_vars:
+      all:
+        superset_managed_ca: "/usr/local/share/ca-certificates/superset-molecule-ca.crt"
+        superset_managed_user: "superset"
+        superset_managed_password: "moleculemanagedpassword"
+        superset_secret_key: "moleculeManagedMoleculeManaged42"
+        superset_public_url: "http://superset-app.molecule.local"
+        superset_admin:
+          username: "admin"
+          firstname: "Molecule"
+          lastname: "Admin"
+          email: "admin@molecule.local"
+          password: "moleculeadminpassword"
+      superset_app:
+        # Nothing is installed locally: both stores are remote services.
+        superset_manage_postgresql: false
+        superset_manage_valkey: false
+        # Deliberately the legacy postgres:// scheme with no sslmode in the query,
+        # to exercise both the driver rewrite and the ssl completion.
+        superset_db_url: "postgres://superset:moleculemanagedpassword@superset-data:5432/superset"
+        superset_db:
+          host: "superset-data"
+          port: 5432
+          name: "superset"
+          user: "superset"
+          password: "moleculemanagedpassword"
+          sslmode: "verify-full"
+          ca_cert: "/usr/local/share/ca-certificates/superset-molecule-ca.crt"
+        # Valkey addressed with the provider scheme, normalised to rediss://.
+        superset_valkey_url: "valkeys://superset:moleculemanagedpassword@superset-data:6379"
+        superset_valkey:
+          host: "superset-data"
+          port: 6379
+          username: "superset"
+          password: "moleculemanagedpassword"
+          tls: true
+          ssl_cert_reqs: "required"
+          ca_cert: "/usr/local/share/ca-certificates/superset-molecule-ca.crt"
+          db_celery: 0
+          db_results: 0
+          db_cache: 0
+          db_ratelimit: 0
+        superset_gunicorn:
+          workers: 2
+          worker_class: "gevent"
+          worker_connections: 200
+          timeout: 120
+          keepalive: 2
+          limit_request_line: 0
+          limit_request_field_size: 0
+        superset_celery:
+          enabled: true
+          pool: "prefork"
+          concurrency: 1
+          loglevel: "INFO"
+          worker_prefetch_multiplier: 1
+verifier:
+  name: ansible

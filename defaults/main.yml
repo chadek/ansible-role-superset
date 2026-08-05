@@ -1,0 +1,282 @@
+---
+# defaults file for ansible-role-superset
+#
+# The role installs and configures Apache Superset itself: the virtualenv,
+# superset_config.py and the systemd units (gunicorn, celery worker, celery
+# beat). PostgreSQL and Valkey can be installed on the same host as a
+# convenience, and the reverse proxy in front of it is left to another role
+# (chadek.nginx_certbot, load_balancer, ...).
+
+# Inventory group holding every Superset host sharing the same metadata
+# database. Only used to elect the primary: the single host allowed to run the
+# database migrations and celery beat. A standalone host needs nothing here.
+superset_cluster_group: "superset"
+
+superset_is_primary: >-
+  {{ (groups[superset_cluster_group] | default([inventory_hostname]))[0] == inventory_hostname }}
+
+##############################################################################
+# Application
+##############################################################################
+superset_version: "6.1.0"
+
+# System interpreter used to bootstrap the virtualenv. Superset 6.x supports
+# python 3.10 -> 3.12 (Debian 12 ships 3.11, Ubuntu 24.04 ships 3.12). On a
+# distribution whose python3 is newer, install a supported interpreter and name
+# it here, for instance python3.12.
+superset_python_interpreter: "python3"
+
+# Interpreter versions apache-superset accepts, checked before the virtualenv is
+# created. Widen them when moving to a superset release supporting more.
+superset_python_min: "3.10"
+superset_python_max: "3.12"
+
+# Ubuntu 26.04 ships python 3.14, which apache-superset 6.x does not support (it
+# also caps greenlet to 3.1.1, which has no wheel for it). Add the Canonical
+# python backports PPA and pick a supported interpreter:
+#   superset_python_ppa: "ppa:canonical-python-maintainers/python-backports"
+#   superset_python_interpreter: "python3.12"
+# Only used on Ubuntu. For an interpreter that does not come from apt (pyenv, uv)
+# give an absolute path as superset_python_interpreter and override
+# superset_os_packages, whose python entries are derived from that name.
+superset_python_ppa: ""
+
+superset_user: { name: "superset", group: "superset" }
+
+superset_dir:
+  root: "/opt/superset"
+  venv: "/opt/superset/venv"
+  conf: "/etc/superset"
+  home: "/var/lib/superset"
+  upload: "/var/lib/superset/uploads"
+  log: "/var/log/superset"
+
+# Extra python packages installed in the virtualenv, in the same pip
+# transaction as apache-superset so that pip resolves a consistent set.
+# Add the database drivers you need to query from Superset here.
+superset_pip_packages:
+  - "psycopg2-binary"
+  # The redis client is also the valkey client: same protocol, no valkey
+  # specific package to install.
+  - "redis"
+  - "gunicorn"
+  # gevent 25+ requires greenlet >= 3.2.2 while apache-superset 6.x caps
+  # greenlet to 3.1.1, keep the last compatible release.
+  - "gevent<25"
+  - "Pillow"
+  # The 6.1.0 wheel under-declares these two. rich is imported by
+  # superset.cli.test_db, and cachetools by db_engine_specs/aws_iam.py, which
+  # load_engine_specs() imports: without it every code path resolving a database
+  # engine spec raises ModuleNotFoundError, not only `superset load_examples`.
+  - "rich"
+  - "cachetools"
+
+# Optional pip constraints file (URL or path) applied to the whole install.
+# superset_pip_constraints: "https://raw.githubusercontent.com/apache/superset/6.1.0/requirements/base.txt"
+
+# Force a pip upgrade run even when apache-superset is already installed.
+superset_pip_upgrade: false
+
+##############################################################################
+# Metadata database (PostgreSQL)
+##############################################################################
+# Set superset_manage_postgresql to true on the host that must also run the
+# PostgreSQL server: the geerlingguy.postgresql role is then called with the
+# database, the role, the pg_hba entries and the listen address derived from the
+# superset_db values below.
+superset_manage_postgresql: false
+
+superset_db:
+  host: "127.0.0.1"
+  port: 5432
+  name: "superset"
+  user: "superset"
+  password: "{{ vault_superset_db_password | default('') }}"
+  # libpq sslmode: disable | allow | prefer | require | verify-ca | verify-full
+  # Managed services require at least 'require'; 'verify-full' additionally
+  # needs ca_cert and is what you want against a public endpoint.
+  sslmode: "prefer"
+  # Path, on the superset host, of the CA bundle provided by the service.
+  ca_cert: ""
+
+# Alternatively paste the connection string of the managed service. postgres://
+# and bare postgresql:// are rewritten to postgresql+psycopg2:// for SQLAlchemy,
+# and sslmode/sslrootcert are appended from the fields above when missing.
+# superset_db_url: "postgresql://superset:secret@pg-xxxx.database.cloud.ovh.net:20184/superset?sslmode=require"
+
+superset_db_auth_method: "scram-sha-256"
+
+# CIDRs allowed to reach the metadata database. Only used when this role
+# installs PostgreSQL: they are added to pg_hba.conf and switch
+# listen_addresses to '*'.
+superset_db_allowed_networks: []
+# - "10.0.0.0/24"
+
+##############################################################################
+# Valkey (celery broker, results backend and caches)
+##############################################################################
+# Valkey is a fork of Redis 7.2.4 and speaks the same protocol, so the URL
+# scheme stays redis:// or rediss://: neither redis-py nor kombu registers a
+# valkey:// transport, and celery refuses to start on one. Pointing the role at
+# a Redis instance instead works exactly the same way.
+
+# Set superset_manage_valkey to true on the host that must also run Valkey
+# locally (distribution package, configured by this role). Leave it false when
+# pointing at a managed service.
+superset_manage_valkey: false
+
+superset_valkey:
+  host: "127.0.0.1"
+  port: 6379
+  # ACL user, managed services usually hand one out. Empty for a local
+  # instance authenticating with requirepass only.
+  username: ""
+  password: "{{ vault_superset_valkey_password | default('') }}"
+  # true for any endpoint reached over the network (managed service). A local
+  # instance installed by this role serves plaintext on its bind interface.
+  tls: false
+  # required | optional | none. 'required' needs ca_cert unless the provider
+  # certificate is signed by a CA already trusted by the system.
+  ssl_cert_reqs: "required"
+  # Path, on the superset host, of the CA bundle provided by the service.
+  ca_cert: ""
+  # Set the four to 0 when the service only exposes one logical database:
+  # the key prefixes already keep the caches and the results apart.
+  db_celery: 0
+  db_results: 1
+  db_cache: 2
+  db_ratelimit: 3
+
+# Alternatively paste the connection string of the managed service and forget
+# the fields above (except ca_cert, which no URL carries). An OVHcloud
+# valkeys:// URL is normalised to rediss:// automatically.
+# superset_valkey_url: "valkeys://superset:secret@valkey-xxxx.database.cloud.ovh.net:20184"
+
+##############################################################################
+# Local Valkey instance, only read when superset_manage_valkey is true
+##############################################################################
+# Interface Valkey binds on. Use 0.0.0.0 when the other superset hosts of the
+# cluster have to reach it, and give superset_valkey.password a value: without
+# one, protected-mode refuses every non local client anyway.
+superset_valkey_bind_interface: "127.0.0.1"
+
+# Serve TLS from the local instance. The role generates a private CA and a server
+# certificate, closes the plaintext port (port 0 / tls-port) and exports the CA
+# where the superset user can read it, so superset_valkey.tls and
+# superset_valkey.ca_cert are derived from this and must be left alone.
+#
+# Worth turning on as soon as superset_valkey_bind_interface leaves the loopback:
+# the ACL password and every cached query result travel on that socket. The other
+# superset hosts of the cluster do not install valkey, so they need the CA
+# deployed by hand (see superset_valkey.ca_cert) — the file this role writes at
+# {{ superset_dir.conf }}/valkey-ca.crt on this host is the one to distribute.
+superset_manage_valkey_tls: false
+
+# Where the material for the local instance lives. Anything but the CA stays
+# there: the directory the valkey package ships is 0770 valkey:valkey, which no
+# other service account can even traverse.
+superset_valkey_tls_dir: "/etc/valkey/tls"
+
+# Lifetime of both the CA and the server certificate, in the openssl notation
+# community.crypto takes. Neither is renewed while the files are there: delete
+# them and run the role again to roll them over.
+superset_valkey_tls_validity: "+3650d"
+
+# Extra names the server certificate must be valid for, in the openssl SAN
+# notation ('DNS:valkey.example.com', 'IP:10.0.0.4'). The loopback names, the
+# inventory hostname, the bind interface and the address superset dials
+# (superset_valkey.host) are already covered: what belongs here is the name the
+# *other* hosts of the cluster use, since a client checks the certificate
+# against the host it dialled.
+superset_valkey_tls_extra_names: []
+
+# Snapshots are kept by default: the celery broker holds queued tasks
+# (scheduled reports, async SQL Lab queries) which a restart would otherwise
+# drop. Set to false for a cache only instance.
+superset_valkey_persistence: true
+
+# Hard memory cap, empty for none. The eviction policy is always noeviction:
+# it is instance wide, so an LRU one would silently drop queued celery tasks
+# along with cache entries.
+superset_valkey_maxmemory: ""
+
+# Raw valkey.conf directives appended at the end of the generated file.
+superset_valkey_config_extra: ""
+
+##############################################################################
+# Web server (gunicorn)
+##############################################################################
+superset_bind: { host: "0.0.0.0", port: 8088 }
+
+superset_gunicorn:
+  workers: 4
+  worker_class: "gevent"
+  worker_connections: 1000
+  timeout: 120
+  keepalive: 2
+  limit_request_line: 0
+  limit_request_field_size: 0
+
+superset_service_state: started
+superset_service_enabled: true
+
+##############################################################################
+# Celery
+##############################################################################
+superset_celery:
+  enabled: true
+  pool: "prefork"
+  concurrency: 4
+  loglevel: "INFO"
+  worker_prefetch_multiplier: 1
+
+##############################################################################
+# Superset configuration (superset_config.py)
+##############################################################################
+superset_secret_key: "{{ vault_superset_secret_key | default('') }}"
+
+# Public URL Superset is reached at, through whatever reverse proxy sits in
+# front of it. It drives the session cookie 'secure' flag, the webdriver base
+# URL and the domain Superset advertises.
+superset_public_url: "http://superset.example.com"
+
+superset_row_limit: 50000
+superset_webserver_timeout: "{{ superset_gunicorn.timeout }}"
+superset_cache_default_timeout: 86400
+superset_sqllab_timeout: 300
+
+superset_feature_flags:
+  DASHBOARD_RBAC: true
+  EMBEDDED_SUPERSET: true
+  DISABLE_EMBEDDED_SUPERSET_LOGOUT: true
+  # Jinja in the SQL of virtual datasets and charts ({{ from_dttm }},
+  # {% if %}, {{ current_username() }}, ...). Off upstream, but a dashboard
+  # exported from another instance almost always carries some: without the flag
+  # the template is handed to the SQL parser verbatim and every chart fails with
+  # "Unable to parse SQL / Error parsing near '{%'". The trade-off is that
+  # anyone allowed to edit a dataset can then run Jinja server side, so turn it
+  # off on an instance where dataset authors are not trusted.
+  ENABLE_TEMPLATE_PROCESSING: true
+
+# Trust X-Forwarded-* headers coming from the reverse proxy.
+superset_enable_proxy_fix: true
+superset_proxy_fix_config: { x_for: 1, x_proto: 1, x_host: 1, x_port: 1, x_prefix: 1 }
+
+# Raw python appended at the end of superset_config.py.
+superset_config_extra: ""
+
+# Extra environment variables injected in every systemd unit.
+superset_environment: {}
+
+##############################################################################
+# Bootstrap
+##############################################################################
+superset_admin:
+  username: "admin"
+  firstname: "Superset"
+  lastname: "Admin"
+  email: "admin@example.com"
+  password: "{{ vault_superset_admin_password | default('') }}"
+
+# Loading the examples is slow, only useful on a demo instance.
+superset_load_examples: false

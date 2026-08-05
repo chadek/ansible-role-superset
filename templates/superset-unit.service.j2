@@ -1,0 +1,41 @@
+{{ ansible_managed | comment }}
+# Rendered once per entry of superset_units: the web server, the celery worker
+# and the celery beat scheduler.
+
+[Unit]
+Description = {{ unit.description }}
+Documentation = https://superset.apache.org/docs/intro
+After = {{ unit.after }}
+Wants = network-online.target
+
+[Service]
+Type = simple
+User = {{ superset_user.name }}
+Group = {{ superset_user.group }}
+WorkingDirectory = {{ superset_dir.home }}
+EnvironmentFile = {{ superset_env_file }}
+ExecStart = {{ unit.exec_start }}
+{% if unit.exec_reload | default('') | length > 0 %}
+ExecReload = {{ unit.exec_reload }}
+{% endif %}
+KillMode = mixed
+TimeoutStopSec = {{ unit.stop_timeout }}
+Restart = always
+RestartSec = 5
+
+# Hardening
+NoNewPrivileges = yes
+PrivateTmp = yes
+PrivateDevices = yes
+ProtectSystem = full
+ProtectHome = yes
+ProtectControlGroups = yes
+ProtectKernelModules = yes
+ProtectKernelTunables = yes
+RestrictNamespaces = yes
+RestrictRealtime = yes
+LockPersonality = yes
+ReadWritePaths = {{ superset_dir.home }} {{ superset_dir.log }} {{ superset_dir.upload }}
+
+[Install]
+WantedBy = multi-user.target

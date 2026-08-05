@@ -1,0 +1,16 @@
+---
+# Every service of this host is restarted together: they share the virtualenv,
+# superset_config.py and the environment file, so anything worth restarting one
+# for is worth restarting all of them for.
+- name: Restart superset
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: restarted
+    daemon_reload: true
+  loop: "{{ superset_active_services }}"
+  when: superset_service_state in ['started', 'restarted']
+
+- name: Restart valkey
+  ansible.builtin.systemd:
+    name: "{{ superset_valkey_service }}"
+    state: restarted

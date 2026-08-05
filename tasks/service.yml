@@ -1,0 +1,40 @@
+---
+# Every unit is deployed on every host, whatever this host runs: a unit that
+# stopped being wanted (celery turned off, primary role moved to another host) is
+# then stopped and disabled by the next task instead of being left behind.
+- name: Superset | Deploy the systemd units
+  ansible.builtin.template:
+    src: superset-unit.service.j2
+    dest: "/etc/systemd/system/{{ unit.name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ superset_units }}"
+  loop_control:
+    loop_var: unit
+    label: "{{ unit.name }}"
+  notify: Restart superset
+
+- name: Superset | Start the services this host has to run, stop the others
+  ansible.builtin.systemd:
+    name: "{{ unit.name }}"
+    state: "{{ superset_service_state if unit.name in superset_active_services else 'stopped' }}"
+    enabled: "{{ superset_service_enabled if unit.name in superset_active_services else false }}"
+    daemon_reload: true
+  loop: "{{ superset_units }}"
+  loop_control:
+    loop_var: unit
+    label: "{{ unit.name }}"
+
+- name: Superset | Apply pending restarts before probing the application
+  ansible.builtin.meta: flush_handlers
+
+- name: Superset | Wait for the web interface to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ superset_bind.port }}/health"
+    status_code: 200
+  register: _superset_health
+  until: _superset_health is succeeded
+  retries: 30
+  delay: 5
+  when: superset_service_state in ['started', 'restarted']

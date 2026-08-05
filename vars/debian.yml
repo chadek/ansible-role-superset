@@ -1,0 +1,30 @@
+---
+# Debian/Ubuntu build and runtime dependencies for the superset virtualenv.
+superset_os_packages:
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - libffi-dev
+  - libsasl2-dev
+  - libldap2-dev
+  - libpq-dev
+  - default-libmysqlclient-dev
+  - libxml2-dev
+  - libxslt1-dev
+  - "{{ superset_python_interpreter }}-dev"
+  - "{{ superset_python_interpreter }}-venv"
+  - python3-pip
+
+# Local valkey instance, only used when superset_manage_valkey is true.
+# valkey-server is in trixie and in bookworm-backports, and in universe from
+# Ubuntu 24.04 (main from 26.04).
+superset_valkey_packages:
+  - valkey-server
+  - valkey-tools
+
+superset_valkey_service: valkey-server
+superset_valkey_config_file: /etc/valkey/valkey.conf
+superset_valkey_config_group: valkey
+superset_valkey_data_dir: /var/lib/valkey
+superset_valkey_log_file: /var/log/valkey/valkey-server.log
+superset_valkey_pid_file: /run/valkey/valkey-server.pid

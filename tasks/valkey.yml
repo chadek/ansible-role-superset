@@ -1,0 +1,47 @@
+---
+# No usable community role exists for Valkey (the only one published on galaxy
+# is unmaintained), and there is little to do: install the distribution package
+# and hand it a configuration file.
+
+# valkey-server landed in trixie, bookworm only has it in backports (which apt
+# then picks on its own, the package being in no other suite).
+- name: Superset | Enable bookworm-backports, the suite providing valkey
+  ansible.builtin.apt_repository:
+    repo: "deb http://deb.debian.org/debian bookworm-backports main"
+    state: present
+    update_cache: true
+  when:
+    - ansible_distribution == 'Debian'
+    - ansible_distribution_release == 'bookworm'
+
+- name: Superset | Install valkey
+  ansible.builtin.package:
+    name: "{{ superset_valkey_packages }}"
+    state: present
+
+# Before the configuration, which points at the certificate and the key: valkey
+# refuses to start on a tls-port whose material is missing.
+- name: Superset | Generate the TLS material of the local valkey
+  ansible.builtin.include_tasks: valkey_tls.yml
+  when: superset_manage_valkey_tls | bool
+
+- name: Superset | Deploy the valkey configuration
+  ansible.builtin.template:
+    src: valkey.conf.j2
+    dest: "{{ superset_valkey_config_file }}"
+    owner: root
+    group: "{{ superset_valkey_config_group }}"
+    mode: "0640"
+  notify: Restart valkey
+
+- name: Superset | Ensure valkey is running and enabled
+  ansible.builtin.systemd:
+    name: "{{ superset_valkey_service }}"
+    state: started
+    enabled: true
+
+# Superset connects to the broker a few tasks later, so a pending restart (bind
+# address, password) has to be applied right away instead of at the end of the
+# play.
+- name: Superset | Apply the pending valkey restart now
+  ansible.builtin.meta: flush_handlers

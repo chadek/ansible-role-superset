@@ -1,0 +1,22 @@
+---
+# The include_role lives in its own task file on purpose. Ansible resolves a
+# relative include_tasks by walking up the parent include chain, so an
+# include_role sitting directly in main.yml makes the *included* role's path a
+# candidate for the includes that follow: geerlingguy.postgresql ships a
+# tasks/configure.yml and a tasks/initialize.yml, exactly the names this role
+# uses, and main.yml then fails to find its own. One level of nesting keeps the
+# two roles apart.
+#
+# Nothing to do beyond calling the role: the database, the login role, the
+# pg_hba entries, the listen address and the authentication method are all
+# derived from superset_db, superset_db_allowed_networks and
+# superset_db_auth_method in vars/main.yml.
+- name: Superset | Include the postgresql role
+  ansible.builtin.include_role:
+    name: geerlingguy.postgresql
+
+# Superset connects to this database a few tasks later, so a pending restart
+# (listen_addresses, pg_hba.conf) has to be applied right away instead of at the
+# end of the play.
+- name: Superset | Apply the pending postgresql restart now
+  ansible.builtin.meta: flush_handlers

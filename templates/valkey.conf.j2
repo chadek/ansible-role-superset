@@ -1,0 +1,69 @@
+{{ ansible_managed | comment }}
+# Valkey backing Apache Superset: celery broker, results backend and caches.
+
+bind {{ superset_valkey_bind_interface }}
+{% if superset_manage_valkey_tls | bool %}
+# TLS only: the plaintext port is closed, so every client (superset, celery,
+# valkey-cli) has to speak TLS. Clients present no certificate of their own,
+# they authenticate with the ACL password, hence tls-auth-clients no.
+port 0
+tls-port {{ superset_valkey.port }}
+tls-cert-file {{ superset_valkey_tls_dir }}/valkey.crt
+tls-key-file {{ superset_valkey_tls_dir }}/valkey.key
+tls-ca-cert-file {{ superset_valkey_tls_dir }}/ca.crt
+tls-auth-clients no
+{% else %}
+port {{ superset_valkey.port }}
+{% endif %}
+# Refuses non local clients when no password is set, whatever the bind address.
+protected-mode yes
+tcp-backlog 511
+timeout 0
+tcp-keepalive 300
+
+{% if (superset_valkey.username | default('')) | length > 0 %}
+# ACL user, as a managed service hands one out. The default user is disabled, so
+# valkey-cli needs --user/--pass to connect.
+user default off
+user {{ superset_valkey.username }} on >{{ superset_valkey.password }} ~* &* +@all
+{% elif (superset_valkey.password | default('')) | length > 0 %}
+requirepass {{ superset_valkey.password }}
+{% endif %}
+
+# The unit passes --supervised systemd --daemonize no on the command line, which
+# wins over these two anyway.
+daemonize no
+supervised auto
+pidfile {{ superset_valkey_pid_file }}
+
+loglevel notice
+logfile {{ superset_valkey_log_file }}
+databases 16
+dir {{ superset_valkey_data_dir }}
+
+# The eviction policy is instance wide: an LRU one would drop queued celery
+# tasks (scheduled reports, async SQL Lab queries) along with cache entries.
+# Cache growth is bounded by the superset CACHE_DEFAULT_TIMEOUT TTLs instead.
+maxmemory-policy noeviction
+{% if (superset_valkey_maxmemory | default('')) | length > 0 %}
+maxmemory {{ superset_valkey_maxmemory }}
+{% endif %}
+
+{% if superset_valkey_persistence | bool %}
+# Snapshots keep the queued celery tasks across a restart.
+save 900 1
+save 300 10
+save 60 10000
+dbfilename dump.rdb
+rdbcompression yes
+# A failed snapshot must not turn the broker read-only.
+stop-writes-on-bgsave-error no
+{% else %}
+save ""
+{% endif %}
+appendonly no
+{% if (superset_valkey_config_extra | default('')) | length > 0 %}
+
+# superset_valkey_config_extra
+{{ superset_valkey_config_extra }}
+{% endif %}

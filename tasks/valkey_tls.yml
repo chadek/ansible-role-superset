@@ -1,0 +1,92 @@
+---
+# TLS material for the local valkey instance: a private CA signing one server
+# certificate. Clients authenticate with the ACL password, not with a client
+# certificate (tls-auth-clients no), so no client material is generated.
+#
+# Everything stays in the directory the valkey package owns, readable by valkey
+# only, hence the shared ownership in module_defaults. The CA alone is copied
+# out, in configure.yml, to a path the superset user can reach: /etc/valkey is
+# 0770 valkey:valkey on Debian and Ubuntu, and a CA the client cannot read
+# surfaces as "Error 13 connecting to <host>:<port>. Permission denied.", a
+# connection error that names no file.
+
+- name: Superset | Create the valkey TLS directory
+  ansible.builtin.file:
+    path: "{{ superset_valkey_tls_dir }}"
+    state: directory
+    owner: root
+    group: "{{ superset_valkey_config_group }}"
+    mode: "0750"
+
+- name: Superset | Generate the valkey CA and server certificates
+  module_defaults:
+    community.crypto.openssl_privatekey:
+      owner: root
+      group: "{{ superset_valkey_config_group }}"
+      mode: "0640"
+    community.crypto.openssl_csr:
+      owner: root
+      group: "{{ superset_valkey_config_group }}"
+      mode: "0640"
+      use_common_name_for_san: false
+    community.crypto.x509_certificate:
+      owner: root
+      group: "{{ superset_valkey_config_group }}"
+      mode: "0640"
+  block:
+    - name: Superset | Generate the valkey CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ superset_valkey_tls_dir }}/ca.key"
+        size: 4096
+
+    # basicConstraints CA:TRUE has to come from a signing request: the selfsigned
+    # provider copies the extensions of the CSR and adds none of its own, and
+    # openssl refuses a trust anchor that does not claim to be a CA.
+    - name: Superset | Generate the valkey CA signing request
+      community.crypto.openssl_csr:
+        path: "{{ superset_valkey_tls_dir }}/ca.csr"
+        privatekey_path: "{{ superset_valkey_tls_dir }}/ca.key"
+        common_name: "{{ inventory_hostname | truncate(40, true, '') }} valkey CA"
+        basic_constraints: ["CA:TRUE"]
+        basic_constraints_critical: true
+        key_usage: ["digitalSignature", "keyCertSign", "cRLSign"]
+        key_usage_critical: true
+
+    - name: Superset | Generate the valkey CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ superset_valkey_tls_dir }}/ca.crt"
+        csr_path: "{{ superset_valkey_tls_dir }}/ca.csr"
+        privatekey_path: "{{ superset_valkey_tls_dir }}/ca.key"
+        provider: selfsigned
+        selfsigned_not_after: "{{ superset_valkey_tls_validity }}"
+        # Copied out for the clients, so world readable unlike the rest.
+        mode: "0644"
+      notify: Restart valkey
+
+    - name: Superset | Generate the valkey server private key
+      community.crypto.openssl_privatekey:
+        path: "{{ superset_valkey_tls_dir }}/valkey.key"
+        size: 2048
+
+    # A client verifies the certificate against the name it dialled, so the
+    # request carries every address this instance is reached at.
+    - name: Superset | Generate the valkey server signing request
+      community.crypto.openssl_csr:
+        path: "{{ superset_valkey_tls_dir }}/valkey.csr"
+        privatekey_path: "{{ superset_valkey_tls_dir }}/valkey.key"
+        common_name: "{{ inventory_hostname | truncate(60, true, '') }}"
+        subject_alt_name: "{{ _superset_valkey_tls_san }}"
+        basic_constraints: ["CA:FALSE"]
+        key_usage: ["digitalSignature", "keyEncipherment"]
+        extended_key_usage: ["serverAuth"]
+
+    - name: Superset | Generate the valkey server certificate
+      community.crypto.x509_certificate:
+        path: "{{ superset_valkey_tls_dir }}/valkey.crt"
+        csr_path: "{{ superset_valkey_tls_dir }}/valkey.csr"
+        privatekey_path: "{{ superset_valkey_tls_dir }}/valkey.key"
+        provider: ownca
+        ownca_path: "{{ superset_valkey_tls_dir }}/ca.crt"
+        ownca_privatekey_path: "{{ superset_valkey_tls_dir }}/ca.key"
+        ownca_not_after: "{{ superset_valkey_tls_validity }}"
+      notify: Restart valkey

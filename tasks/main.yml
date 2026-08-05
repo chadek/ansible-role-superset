@@ -1,0 +1,36 @@
+---
+# The role must not assume the play gathered facts: the OS specific vars, the
+# interpreter check, the bookworm-backports suite and geerlingguy.postgresql all
+# read ansible_os_family or ansible_distribution*, and a play declaring
+# gather_facts false leaves them undefined. The minimal subset carries every
+# distribution fact and skips the slow hardware and network probes.
+- name: Superset | Gather the distribution facts the role needs
+  ansible.builtin.setup:
+    gather_subset: ["!all", "min"]
+  when: ansible_os_family is not defined
+
+- name: Superset | Include the OS specific vars
+  ansible.builtin.include_vars: "{{ ansible_os_family | lower }}.yml"
+
+- name: Superset | Check the inventory before touching the host
+  ansible.builtin.include_tasks: preflight.yml
+
+- name: Superset | Install the metadata database
+  ansible.builtin.include_tasks: postgresql.yml
+  when: superset_manage_postgresql | bool
+
+- name: Superset | Install the celery broker
+  ansible.builtin.include_tasks: valkey.yml
+  when: superset_manage_valkey | bool
+
+- name: Superset | Install superset
+  ansible.builtin.include_tasks: install.yml
+
+- name: Superset | Configure superset
+  ansible.builtin.include_tasks: configure.yml
+
+- name: Superset | Initialize the metadata database
+  ansible.builtin.include_tasks: initialize.yml
+
+- name: Superset | Deploy and start the services
+  ansible.builtin.include_tasks: service.yml

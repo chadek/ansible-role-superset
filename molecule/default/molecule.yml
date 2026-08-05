@@ -1,0 +1,101 @@
+---
+dependency:
+  name: galaxy
+  options:
+    role-file: requirements.yml
+driver:
+  name: docker
+# One self contained all-in-one host per supported distribution: superset,
+# PostgreSQL and Valkey. Each is the primary of its own single host group, so
+# each migrates its own local database.
+platforms:
+  - name: superset-debian12
+    image: "geerlingguy/docker-debian12-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    groups:
+      - superset_debian
+  - name: superset-ubuntu2404
+    image: "geerlingguy/docker-ubuntu2404-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    groups:
+      - superset_ubuntu
+  - name: superset-ubuntu2604
+    image: "geerlingguy/docker-ubuntu2604-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    groups:
+      - superset_ubuntu2604
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:${HOME}/.ansible/roles:${MOLECULE_EPHEMERAL_DIRECTORY}/roles"
+  inventory:
+    host_vars:
+      superset-debian12:
+        superset_cluster_group: "superset_debian"
+      superset-ubuntu2404:
+        superset_cluster_group: "superset_ubuntu"
+      # 26.04 ships python 3.14, unsupported by superset: a 3.12 interpreter is
+      # pulled from the Canonical python backports PPA.
+      superset-ubuntu2604:
+        superset_cluster_group: "superset_ubuntu2604"
+        superset_python_ppa: "ppa:canonical-python-maintainers/python-backports"
+        superset_python_interpreter: "python3.12"
+    group_vars:
+      all:
+        superset_secret_key: "moleculeMoleculeMoleculeMolecule42"
+        superset_public_url: "http://{{ inventory_hostname }}.molecule.local"
+        superset_db:
+          host: "127.0.0.1"
+          port: 5432
+          name: "superset"
+          user: "superset"
+          password: "moleculedbpassword"
+        superset_valkey:
+          host: "127.0.0.1"
+          port: 6379
+          username: ""
+          password: ""
+          tls: false
+          db_celery: 0
+          db_results: 1
+          db_cache: 2
+          db_ratelimit: 3
+        superset_admin:
+          username: "admin"
+          firstname: "Molecule"
+          lastname: "Admin"
+          email: "admin@molecule.local"
+          password: "moleculeadminpassword"
+        superset_manage_postgresql: true
+        superset_manage_valkey: true
+        superset_gunicorn:
+          workers: 2
+          worker_class: "gevent"
+          worker_connections: 200
+          timeout: 120
+          keepalive: 2
+          limit_request_line: 0
+          limit_request_field_size: 0
+        superset_celery:
+          enabled: true
+          pool: "prefork"
+          concurrency: 1
+          loglevel: "INFO"
+          worker_prefetch_multiplier: 1
+verifier:
+  name: ansible

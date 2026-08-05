@@ -1,0 +1,111 @@
+---
+- name: Superset | Add the python PPA
+  when:
+    - superset_python_ppa | length > 0
+    - ansible_distribution == 'Ubuntu'
+  block:
+    - name: Superset | Install the tooling needed to add a python PPA
+      ansible.builtin.package:
+        name: software-properties-common
+        state: present
+
+    - name: Superset | Look for the python PPA sources file
+      ansible.builtin.find:
+        paths: /etc/apt/sources.list.d
+        patterns: "*{{ superset_python_ppa | regex_replace('^ppa:', '') | regex_replace('/.*$', '') }}*"
+      register: _superset_python_ppa_file
+
+    # add-apt-repository is used rather than ansible.builtin.apt_repository, which
+    # still fetches the signing key from a hkp keyserver: the distribution tool
+    # talks to the launchpad API over https, writes a signed-by sources file, and
+    # refreshes the apt cache on its own.
+    - name: Superset | Add the python PPA with add-apt-repository
+      ansible.builtin.command: "add-apt-repository -y {{ superset_python_ppa }}"
+      changed_when: true
+      when: _superset_python_ppa_file.matched == 0
+
+- name: Superset | Install the build and runtime dependencies
+  ansible.builtin.package:
+    name: "{{ superset_os_packages }}"
+    state: present
+  register: _superset_os_packages
+  until: _superset_os_packages is succeeded
+  retries: 3
+  delay: 5
+
+- name: Superset | Create the group running superset
+  ansible.builtin.group:
+    name: "{{ superset_user.group }}"
+    system: true
+    state: present
+
+- name: Superset | Create the user running superset
+  ansible.builtin.user:
+    name: "{{ superset_user.name }}"
+    group: "{{ superset_user.group }}"
+    home: "{{ superset_dir.home }}"
+    create_home: false
+    system: true
+    shell: /usr/sbin/nologin
+    state: present
+
+- name: Superset | Ensure the directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop: "{{ superset_dirs_spec }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Superset | Read the version of the python interpreter
+  ansible.builtin.command:
+    argv:
+      - "{{ superset_python_interpreter }}"
+      - "-c"
+      - "import sys; print('%d.%d' % sys.version_info[:2])"
+  register: _superset_python_version
+  changed_when: false
+
+# Failing here is much clearer than a pip resolver error a few minutes later.
+- name: Superset | Check the interpreter version is supported by superset
+  ansible.builtin.assert:
+    that:
+      - _superset_python_version.stdout is version(superset_python_min, '>=')
+      - _superset_python_version.stdout is version(superset_python_max, '<=')
+    fail_msg: >-
+      {{ superset_python_interpreter }} is python {{ _superset_python_version.stdout }},
+      but apache-superset {{ superset_version }} supports {{ superset_python_min }}
+      to {{ superset_python_max }}. Install a supported interpreter and set
+      superset_python_interpreter to it (for instance python3.12).
+
+- name: Superset | Create the virtualenv and refresh its build tooling
+  ansible.builtin.pip:
+    name:
+      - pip
+      - setuptools
+      - wheel
+    state: "{{ 'latest' if superset_pip_upgrade | bool else 'present' }}"
+    virtualenv: "{{ superset_dir.venv }}"
+    virtualenv_command: "{{ superset_python_interpreter }} -m venv"
+
+# Everything goes in a single pip invocation, otherwise pip resolves each call
+# on its own and successive runs keep fighting over shared dependencies (for
+# instance greenlet, which superset caps and gevent wants recent).
+- name: Superset | Install apache-superset and its companion packages
+  ansible.builtin.pip:
+    name: "{{ ['apache-superset==' ~ superset_version] + superset_pip_packages }}"
+    state: "{{ 'latest' if superset_pip_upgrade | bool else 'present' }}"
+    virtualenv: "{{ superset_dir.venv }}"
+    extra_args: "{{ superset_pip_extra_args | trim }}"
+  notify: Restart superset
+
+- name: Superset | Ensure the virtualenv is readable by the superset group
+  ansible.builtin.file:
+    path: "{{ superset_dir.venv }}"
+    state: directory
+    owner: root
+    group: "{{ superset_user.group }}"
+    mode: "0755"

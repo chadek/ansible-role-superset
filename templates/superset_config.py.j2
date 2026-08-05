@@ -1,0 +1,152 @@
+{{ ansible_managed | comment }}
+# Apache Superset {{ superset_version }} production configuration.
+
+import json
+import os
+
+import redis
+from cachelib.redis import RedisCache
+from celery.schedules import crontab
+
+##############################################################################
+# Core
+##############################################################################
+SECRET_KEY = {{ superset_secret_key | to_json }}
+
+SQLALCHEMY_DATABASE_URI = {{ superset_sqlalchemy_uri | to_json }}
+SQLALCHEMY_ENGINE_OPTIONS = {
+    "pool_size": 10,
+    "max_overflow": 20,
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
+}
+
+ROW_LIMIT = {{ superset_row_limit }}
+SUPERSET_WEBSERVER_PORT = {{ superset_bind.port }}
+SUPERSET_WEBSERVER_TIMEOUT = {{ superset_webserver_timeout }}
+SQLLAB_TIMEOUT = {{ superset_sqllab_timeout }}
+SUPERSET_WEBSERVER_DOMAINS = [{{ superset_public_url | urlsplit('hostname') | to_json }}]
+WEBDRIVER_BASEURL = {{ ('http://127.0.0.1:' ~ superset_bind.port ~ '/') | to_json }}
+WEBDRIVER_BASEURL_USER_FRIENDLY = {{ superset_public_url | to_json }}
+
+UPLOAD_FOLDER = {{ (superset_dir.upload ~ '/') | to_json }}
+IMG_UPLOAD_FOLDER = {{ (superset_dir.upload ~ '/') | to_json }}
+
+# Rendered from the superset_feature_flags ansible variable.
+FEATURE_FLAGS = json.loads(
+    """
+{{ superset_feature_flags | to_nice_json(indent=4) | indent(4, true) }}
+    """
+)
+
+##############################################################################
+# Behind a reverse proxy
+##############################################################################
+{% if superset_enable_proxy_fix %}
+ENABLE_PROXY_FIX = True
+PROXY_FIX_CONFIG = json.loads(
+    """
+{{ superset_proxy_fix_config | to_nice_json(indent=4) | indent(4, true) }}
+    """
+)
+{% else %}
+ENABLE_PROXY_FIX = False
+{% endif %}
+
+# The session cookie is signed with SECRET_KEY, which is shared by every host of
+# the cluster: no sticky session is required on the reverse proxy.
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = {{ (superset_public_url is search('^https://')) | ternary('True', 'False') }}
+TALISMAN_ENABLED = False
+
+##############################################################################
+# Valkey caches, shared by the whole cluster
+##############################################################################
+# Valkey speaks the Redis protocol, so the redis:// and rediss:// schemes are
+# used for it too: neither redis-py nor kombu registers a valkey:// transport.
+# The RedisCache class and the CACHE_REDIS_URL key below are cachelib and
+# flask-caching names, they are not endpoint dependent either.
+VALKEY_CACHE_URL = {{ superset_valkey_url_cache | to_json }}
+VALKEY_RESULTS_URL = {{ superset_valkey_url_results | to_json }}
+VALKEY_CELERY_URL = {{ superset_valkey_url_celery | to_json }}
+
+_CACHE_BASE = {
+    "CACHE_TYPE": "RedisCache",
+    "CACHE_REDIS_URL": VALKEY_CACHE_URL,
+    "CACHE_DEFAULT_TIMEOUT": {{ superset_cache_default_timeout }},
+}
+
+CACHE_CONFIG = {**_CACHE_BASE, "CACHE_KEY_PREFIX": "superset_metadata_"}
+DATA_CACHE_CONFIG = {**_CACHE_BASE, "CACHE_KEY_PREFIX": "superset_data_"}
+FILTER_STATE_CACHE_CONFIG = {
+    **_CACHE_BASE,
+    "CACHE_KEY_PREFIX": "superset_filter_",
+    "REFRESH_TIMEOUT_ON_RETRIEVAL": True,
+}
+EXPLORE_FORM_DATA_CACHE_CONFIG = {
+    **_CACHE_BASE,
+    "CACHE_KEY_PREFIX": "superset_explore_",
+    "REFRESH_TIMEOUT_ON_RETRIEVAL": True,
+}
+
+# Flask-Limiter must not use its in-memory backend on a multi node setup.
+RATELIMIT_STORAGE_URI = {{ superset_valkey_url_ratelimit | to_json }}
+
+##############################################################################
+# Celery: async SQL Lab queries, cache warm-up, alerts and reports
+##############################################################################
+{% if superset_celery.enabled %}
+class CeleryConfig:
+    broker_url = VALKEY_CELERY_URL
+    result_backend = VALKEY_CELERY_URL
+    broker_connection_retry_on_startup = True
+    imports = (
+        "superset.sql_lab",
+        "superset.tasks.cache",
+        "superset.tasks.scheduler",
+        "superset.tasks.thumbnails",
+    )
+    worker_prefetch_multiplier = {{ superset_celery.worker_prefetch_multiplier }}
+    task_acks_late = False
+    task_annotations = {
+        "sql_lab.get_sql_results": {"rate_limit": "100/s"},
+    }
+    beat_schedule = {
+        "reports.scheduler": {
+            "task": "reports.scheduler",
+            "schedule": crontab(minute="*", hour="*"),
+        },
+        "reports.prune_log": {
+            "task": "reports.prune_log",
+            "schedule": crontab(minute=10, hour=0),
+        },
+    }
+
+
+CELERY_CONFIG = CeleryConfig
+
+# cachelib.RedisCache takes either a hostname or an already built client, and
+# a client is the only way to carry TLS and ACL settings from the URL.
+RESULTS_BACKEND = RedisCache(
+    host=redis.Redis.from_url(VALKEY_RESULTS_URL),
+    key_prefix="superset_results",
+)
+{% else %}
+CELERY_CONFIG = None
+{% endif %}
+
+##############################################################################
+# Logging
+##############################################################################
+ENABLE_TIME_ROTATE = True
+TIME_ROTATE_LOG_LEVEL = "INFO"
+FILENAME = os.path.join({{ superset_dir.log | to_json }}, "superset.log")
+LOG_LEVEL = "INFO"
+{% if superset_config_extra | length > 0 %}
+
+##############################################################################
+# Extra configuration (superset_config_extra)
+##############################################################################
+{{ superset_config_extra }}
+{% endif %}

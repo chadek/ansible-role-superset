@@ -1,0 +1,128 @@
+---
+# None of these asserts is no_log: an assert only ever reports the expression it
+# evaluated ("superset_db.password | length > 0"), never the value, and no_log
+# would hide the fail_msg that explains what to do.
+- name: Superset | Check the mandatory secrets are provided
+  ansible.builtin.assert:
+    that:
+      - superset_secret_key | length >= 32
+      - superset_db.password | length > 0
+      - superset_admin.password | length > 0
+    fail_msg: >-
+      superset_secret_key (at least 32 characters), superset_db.password and
+      superset_admin.password must be set, ideally from an ansible-vault
+      (vault_superset_secret_key, vault_superset_db_password,
+      vault_superset_admin_password). Generate a secret key with
+      `openssl rand -base64 42`.
+
+- name: Superset | Check the celery broker
+  when: superset_celery.enabled | bool
+  block:
+    - name: Superset | Check the valkey endpoint looks usable
+      ansible.builtin.assert:
+        that:
+          - superset_valkey_host | length > 0
+          - superset_valkey_port | int > 0
+          - superset_valkey_port | int < 65536
+        fail_msg: >-
+          Could not resolve a usable valkey endpoint
+          ({{ superset_valkey_host }}:{{ superset_valkey_port }}). Managed
+          service consoles often show the port as a placeholder, make sure the
+          real one is set in superset_valkey.port or in the superset_valkey_url
+          connection string.
+
+    # A network reachable instance without authentication lets anyone read the
+    # query results and poison the celery queue. TLS is not enforced: it is
+    # mandatory on a managed endpoint but usually skipped on a private network.
+    - name: Superset | Check a remote valkey endpoint is authenticated
+      ansible.builtin.assert:
+        that:
+          - (_superset_valkey_url_given | bool) or ((superset_valkey.password | default('')) | length > 0)
+        fail_msg: >-
+          {{ superset_valkey_host }} is not local, so superset_valkey.password
+          (or a superset_valkey_url carrying the credentials) is required.
+      when: superset_valkey_host not in ['127.0.0.1', '::1', 'localhost']
+
+    # The local instance serves plaintext unless it is asked to serve TLS, in
+    # which case the role owns the whole chain and derives the client settings
+    # from it.
+    - name: Superset | Check TLS is not expected from the locally installed valkey
+      ansible.builtin.assert:
+        that:
+          - not (_superset_valkey_tls | bool)
+        fail_msg: >-
+          superset_manage_valkey installs a plaintext valkey instance, so
+          superset_valkey.tls (or a rediss:// / valkeys:// superset_valkey_url)
+          can only point at a service this role does not manage. Either set
+          superset_manage_valkey_tls to have the local instance serve TLS, drop
+          the TLS settings, or leave superset_manage_valkey false and address the
+          managed endpoint.
+      when:
+        - superset_manage_valkey | bool
+        - not (superset_manage_valkey_tls | bool)
+
+# The generated CA is copied to superset_valkey_ca_cert_file and the URLs point
+# at that copy, so a ca_cert given here would be read by nobody.
+- name: Superset | Check no CA is given for the locally served TLS
+  ansible.builtin.assert:
+    that:
+      - ((superset_valkey.ca_cert | default('')) | length) == 0
+      - not (_superset_valkey_url_given | bool)
+    fail_msg: >-
+      superset_manage_valkey_tls generates the CA itself and exports it to
+      {{ superset_valkey_ca_cert_file }}: superset_valkey.ca_cert and
+      superset_valkey_url have to be left unset. Point them at a managed endpoint
+      with superset_manage_valkey false instead.
+  when: _superset_valkey_tls_local | bool
+
+# protected-mode already refuses every non local client of a passwordless
+# instance, which looks like a broken cluster rather than a configuration
+# mistake. TLS changes nothing here: it encrypts, it authenticates nobody.
+- name: Superset | Check the local valkey is authenticated when it leaves the loopback
+  ansible.builtin.assert:
+    that:
+      - ((superset_valkey.password | default('')) | length) > 0
+    fail_msg: >-
+      superset_valkey_bind_interface is {{ superset_valkey_bind_interface }}, so
+      the instance is reachable from the network: set superset_valkey.password
+      (with superset_valkey.username for an ACL user), otherwise protected-mode
+      refuses the other hosts of the cluster.
+  when:
+    - superset_manage_valkey | bool
+    - superset_valkey_bind_interface not in ['127.0.0.1', '::1', 'localhost']
+
+- name: Superset | Check the metadata database is not SQLite
+  ansible.builtin.assert:
+    that:
+      - superset_db_host | length > 0
+      - superset_db_port | int > 0
+      - superset_db_port | int < 65536
+    fail_msg: >-
+      A PostgreSQL metadata database is mandatory, and every superset host and
+      celery worker sharing an instance must point to the same one. Got
+      {{ superset_db_host }}:{{ superset_db_port }}.
+
+# Same reasoning as for valkey, plus the metadata database holds the encrypted
+# credentials of every data source: it must never be reached in clear.
+- name: Superset | Check a remote metadata database is authenticated and encrypted
+  ansible.builtin.assert:
+    that:
+      - (_superset_db_url_given | bool) or ((superset_db.password | default('')) | length > 0)
+      - "'sslmode=disable' not in superset_sqlalchemy_uri"
+    fail_msg: >-
+      {{ superset_db_host }} is not local: it needs a password and an sslmode of
+      at least 'require' (set superset_db.sslmode, or carry it in
+      superset_db_url).
+  when: superset_db_host not in ['127.0.0.1', '::1', 'localhost']
+
+- name: Superset | Check the same secret key is shared by every host of the cluster
+  ansible.builtin.assert:
+    that:
+      - >-
+        groups[superset_cluster_group] | map('extract', hostvars)
+        | map(attribute='superset_secret_key', default='') | unique | length == 1
+    fail_msg: >-
+      All hosts of {{ superset_cluster_group }} must share the same
+      superset_secret_key, otherwise session cookies and encrypted database
+      credentials break as soon as a client is served by another host.
+  when: groups[superset_cluster_group] | default([]) | length > 1

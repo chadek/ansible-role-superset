@@ -1,0 +1,102 @@
+---
+- name: Verify every superset host
+  hosts: superset
+  become: true
+  gather_facts: true
+
+  vars:
+    superset_env:
+      SUPERSET_CONFIG_PATH: /etc/superset/superset_config.py
+      PYTHONPATH: /etc/superset
+      FLASK_APP: superset
+
+  tasks:
+    - name: Verify | Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Verify | Web and worker services are running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item ~ '.service'].state == 'running'
+        fail_msg: "{{ item }}.service is not running on {{ inventory_hostname }}"
+      loop:
+        - superset
+        - superset-worker
+
+    - name: Verify | Celery beat runs on the first host only
+      ansible.builtin.assert:
+        that:
+          - >-
+            (inventory_hostname == groups['superset'][0])
+            == (ansible_facts.services['superset-beat.service'].state | default('stopped') == 'running')
+        fail_msg: >-
+          exactly one celery beat instance may run in the cluster, and it must be
+          the one of {{ groups['superset'][0] }}
+
+    - name: Verify | The host answers on its own address
+      ansible.builtin.uri:
+        url: "http://{{ ansible_default_ipv4.address }}:8088/health"
+        return_content: true
+      register: _health
+      failed_when: "'OK' not in _health.content"
+
+    # Proves the broker is really the shared instance of the first host and that
+    # both workers joined it: each ping answers for the whole cluster.
+    - name: Verify | The celery worker answers over the shared valkey broker
+      ansible.builtin.command: >-
+        /opt/superset/venv/bin/celery --app=superset.tasks.celery_app:app inspect ping --timeout 30
+      environment: "{{ superset_env }}"
+      register: _celery_ping
+      changed_when: false
+      failed_when: "'pong' not in _celery_ping.stdout"
+
+    - name: Verify | The shared metadata schema is reachable and migrated
+      ansible.builtin.command: >-
+        /opt/superset/venv/bin/superset db current
+      environment: "{{ superset_env }}"
+      register: _db_current
+      changed_when: false
+      failed_when: "'(head)' not in (_db_current.stdout ~ _db_current.stderr)"
+
+- name: Verify the shared services host
+  hosts: superset-node1
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Verify | Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Verify | Valkey is running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['valkey-server.service'].state == 'running'
+        fail_msg: "valkey-server.service is not running"
+
+    # postgresql.service is only a wrapper on Debian, the cluster instance is
+    # postgresql@<version>-main.service, so the socket is checked instead.
+    - name: Verify | Both shared services listen on the private network
+      ansible.builtin.wait_for:
+        host: "{{ ansible_default_ipv4.address }}"
+        port: "{{ item }}"
+        timeout: 10
+      loop:
+        - 5432
+        - 6379
+
+    - name: Verify | Valkey refuses an unauthenticated client
+      ansible.builtin.command: >-
+        valkey-cli -h {{ ansible_default_ipv4.address }} -p 6379 ping
+      register: _valkey_noauth
+      changed_when: false
+      failed_when: "'NOAUTH' not in (_valkey_noauth.stdout ~ _valkey_noauth.stderr)"
+
+    # Snapshots are what keeps the queued celery tasks across a restart.
+    - name: Verify | Valkey authenticates and keeps its snapshots
+      ansible.builtin.command: >-
+        valkey-cli -h {{ ansible_default_ipv4.address }} -p 6379
+        -a moleculevalkeypassword --no-auth-warning
+        config get save
+      register: _valkey_save
+      changed_when: false
+      failed_when: "'900 1' not in _valkey_save.stdout"

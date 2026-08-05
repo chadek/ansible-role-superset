@@ -1,0 +1,223 @@
+---
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 600
+      changed_when: false
+
+    - name: Install packages needed by the test harness
+      ansible.builtin.package:
+        name:
+          - acl
+          - ca-certificates
+          - curl
+          - iproute2
+          - openssl
+          - procps
+        state: present
+
+# One self signed CA signs a single server certificate used by both services,
+# exactly as a provider hands out one CA bundle for its endpoints.
+- name: Prepare | Stand up TLS only PostgreSQL and Valkey
+  hosts: superset_data
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Create the TLS material directory
+      ansible.builtin.file:
+        path: /etc/superset-molecule-tls
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Prepare | Generate the CA and the server certificate
+      ansible.builtin.shell:
+        chdir: /etc/superset-molecule-tls
+        cmd: |
+          set -e
+          openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+            -subj "/CN=superset-molecule-ca" -keyout ca.key -out ca.crt
+          openssl req -nodes -newkey rsa:2048 \
+            -subj "/CN=superset-data" -keyout server.key -out server.csr
+          printf 'subjectAltName=DNS:superset-data\n' > san.cnf
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+            -CAcreateserial -days 30 -extfile san.cnf -out server.crt
+        creates: /etc/superset-molecule-tls/server.crt
+
+    # ----------------------------------------------------------------- valkey
+    - name: Prepare | Enable bookworm-backports
+      ansible.builtin.apt_repository:
+        repo: "deb http://deb.debian.org/debian bookworm-backports main"
+        state: present
+        update_cache: true
+
+    - name: Prepare | Install valkey and postgresql
+      ansible.builtin.apt:
+        name:
+          - valkey-server
+          - valkey-tools
+          - postgresql
+        state: present
+
+    - name: Prepare | Copy the TLS material for valkey
+      ansible.builtin.copy:
+        src: "/etc/superset-molecule-tls/{{ item }}"
+        dest: "/etc/valkey/{{ item }}"
+        remote_src: true
+        owner: root
+        group: valkey
+        mode: "0640"
+      loop:
+        - ca.crt
+        - server.crt
+        - server.key
+
+    - name: Prepare | Configure valkey for TLS only, with an ACL user
+      ansible.builtin.copy:
+        dest: /etc/valkey/valkey.conf
+        owner: root
+        group: valkey
+        mode: "0640"
+        content: |
+          port 0
+          tls-port 6379
+          bind 0.0.0.0 -::1
+          tls-cert-file /etc/valkey/server.crt
+          tls-key-file /etc/valkey/server.key
+          tls-ca-cert-file /etc/valkey/ca.crt
+          tls-auth-clients no
+          protected-mode no
+          maxmemory-policy noeviction
+          appendonly no
+          save ""
+          logfile /var/log/valkey/valkey-server.log
+          dir /var/lib/valkey
+          user default off
+          user {{ superset_managed_user }} on >{{ superset_managed_password }} ~* &* +@all
+      notify: Restart valkey
+
+    # ------------------------------------------------------------- postgresql
+    - name: Prepare | Find the postgresql configuration directory
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          ls -1d /etc/postgresql/*/main | head -1
+        executable: /bin/bash
+      register: _pg_conf_dir
+      changed_when: false
+
+    - name: Prepare | Copy the TLS material for postgresql
+      ansible.builtin.copy:
+        src: "/etc/superset-molecule-tls/{{ item }}"
+        dest: "/etc/postgresql/{{ item }}"
+        remote_src: true
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      loop:
+        - ca.crt
+        - server.crt
+        - server.key
+
+    - name: Prepare | Turn on TLS in postgresql.conf
+      ansible.builtin.blockinfile:
+        path: "{{ _pg_conf_dir.stdout | trim }}/postgresql.conf"
+        marker: "# {mark} molecule managed tls"
+        block: |
+          listen_addresses = '*'
+          ssl = on
+          ssl_cert_file = '/etc/postgresql/server.crt'
+          ssl_key_file = '/etc/postgresql/server.key'
+          ssl_ca_file = '/etc/postgresql/ca.crt'
+      notify: Restart postgresql
+
+    # hostssl only: a plaintext client is refused, which the verify step checks.
+    - name: Prepare | Require TLS in pg_hba.conf
+      ansible.builtin.copy:
+        dest: "{{ _pg_conf_dir.stdout | trim }}/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+        content: |
+          local   all all                     peer
+          hostssl all all 127.0.0.1/32        scram-sha-256
+          hostssl all all 172.16.0.0/12       scram-sha-256
+      notify: Restart postgresql
+
+    - name: Prepare | Apply the service configuration now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Prepare | Ensure both services are running
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - valkey-server
+        - postgresql
+
+    # psql is used rather than the community.postgresql modules to keep psycopg2
+    # off this host, which stands in for an appliance.
+    - name: Prepare | Create the superset role
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ superset_managed_user }}'" | grep -q 1 \
+            || psql -c "CREATE ROLE {{ superset_managed_user }} LOGIN PASSWORD '{{ superset_managed_password }}'"
+        executable: /bin/bash
+      become_user: postgres
+      register: _pg_role
+      changed_when: "'CREATE ROLE' in _pg_role.stdout"
+
+    - name: Prepare | Create the superset database
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          psql -tAc "SELECT 1 FROM pg_database WHERE datname='superset'" | grep -q 1 \
+            || psql -c "CREATE DATABASE superset OWNER {{ superset_managed_user }}"
+        executable: /bin/bash
+      become_user: postgres
+      register: _pg_db
+      changed_when: "'CREATE DATABASE' in _pg_db.stdout"
+
+    - name: Prepare | Read the CA certificate
+      ansible.builtin.slurp:
+        src: /etc/superset-molecule-tls/ca.crt
+      register: _managed_ca
+
+  handlers:
+    - name: Restart valkey
+      ansible.builtin.systemd:
+        name: valkey-server
+        state: restarted
+
+    - name: Restart postgresql
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted
+
+- name: Prepare | Trust the CA on the application host
+  hosts: superset_app
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Prepare | Install the CA certificate
+      ansible.builtin.copy:
+        content: "{{ hostvars['superset-data']._managed_ca.content | b64decode }}"
+        dest: "{{ superset_managed_ca }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Prepare | Refresh the system CA bundle
+      ansible.builtin.command: update-ca-certificates
+      changed_when: false

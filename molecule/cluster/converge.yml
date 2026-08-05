@@ -1,0 +1,15 @@
+---
+# The shared PostgreSQL and Valkey instances have to be up before the second
+# host waits on them, so the primary is converged first. It is also the only one
+# running the schema migration.
+- name: Converge | Primary host and shared services
+  hosts: superset-node1
+  become: true
+  roles:
+    - role: ansible-role-superset
+
+- name: Converge | Remaining superset hosts
+  hosts: superset:!superset-node1
+  become: true
+  roles:
+    - role: ansible-role-superset

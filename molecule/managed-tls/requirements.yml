@@ -1,0 +1,4 @@
+---
+# Not included by the role in this scenario (both stores are remote), kept so
+# that the galaxy dependency step has something to resolve.
+- src: geerlingguy.postgresql

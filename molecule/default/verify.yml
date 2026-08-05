@@ -1,0 +1,99 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    superset_expected_version: "6.1.0"
+    superset_env:
+      SUPERSET_CONFIG_PATH: /etc/superset/superset_config.py
+      PYTHONPATH: /etc/superset
+      FLASK_APP: superset
+    superset_expected_services:
+      - superset
+      - superset-worker
+      - superset-beat
+      # installed and configured by the role too, on this all-in-one host
+      - valkey-server
+
+  tasks:
+    - name: Verify | Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Verify | Superset services are running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item ~ '.service'].state == 'running'
+        fail_msg: "{{ item }}.service is not running"
+      loop: "{{ superset_expected_services }}"
+
+    - name: Verify | The health endpoint answers OK
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8088/health"
+        return_content: true
+      register: _health
+      failed_when: "'OK' not in _health.content"
+
+    - name: Verify | The login page is served
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8088/login/"
+        return_content: true
+        status_code: 200
+      register: _login
+      failed_when: "'Superset' not in _login.content"
+
+    - name: Verify | The metadata schema has been created
+      community.postgresql.postgresql_query:
+        db: superset
+        login_unix_socket: /var/run/postgresql
+        query: "SELECT count(*) AS nb FROM information_schema.tables WHERE table_name = 'dashboards'"
+      become_user: postgres
+      register: _schema
+
+    - name: Verify | The dashboards table exists
+      ansible.builtin.assert:
+        that:
+          - _schema.query_result[0].nb | int == 1
+        fail_msg: "superset db upgrade did not create the metadata schema"
+
+    - name: Verify | The admin user exists
+      ansible.builtin.command: /opt/superset/venv/bin/superset fab list-users
+      environment: "{{ superset_env }}"
+      register: _users
+      changed_when: false
+      failed_when: "'admin' not in _users.stdout"
+
+    - name: Verify | The celery worker is registered against valkey
+      ansible.builtin.command: >-
+        /opt/superset/venv/bin/celery --app=superset.tasks.celery_app:app inspect ping --timeout 30
+      environment: "{{ superset_env }}"
+      register: _celery_ping
+      changed_when: false
+      failed_when: "'pong' not in _celery_ping.stdout"
+
+    # load_engine_specs imports every db_engine_specs module, which is where the
+    # dependencies the wheel forgets to declare surface (rich, cachetools...).
+    # Any code path resolving a database engine spec would raise otherwise.
+    - name: Verify | Every database engine spec imports
+      ansible.builtin.command:
+        argv:
+          - /opt/superset/venv/bin/python
+          - -c
+          - |
+            from superset.app import create_app
+            app = create_app()
+            with app.app_context():
+                from superset.db_engine_specs import load_engine_specs
+                print("engine_specs=%d" % len(list(load_engine_specs())))
+      environment: "{{ superset_env }}"
+      register: _engine_specs
+      changed_when: false
+      failed_when: "'engine_specs=' not in _engine_specs.stdout"
+
+    - name: Verify | The virtualenv holds the expected superset version
+      ansible.builtin.command: /opt/superset/venv/bin/superset version
+      environment: "{{ superset_env }}"
+      register: _version
+      changed_when: false
+      failed_when: superset_expected_version not in _version.stdout

@@ -1,0 +1,94 @@
+---
+# Two Superset hosts sharing one metadata database and one Valkey instance, both
+# installed on the first of them. No reverse proxy: whatever sits in front of
+# these two is another role's business.
+dependency:
+  name: galaxy
+  options:
+    role-file: requirements.yml
+driver:
+  name: docker
+platforms:
+  - name: superset-node1
+    image: "geerlingguy/docker-debian12-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    networks:
+      - name: superset-molecule
+    groups:
+      - superset
+  - name: superset-node2
+    image: "geerlingguy/docker-debian12-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+    networks:
+      - name: superset-molecule
+    groups:
+      - superset
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:${HOME}/.ansible/roles:${MOLECULE_EPHEMERAL_DIRECTORY}/roles"
+  inventory:
+    host_vars:
+      # First host of the group, hence the primary: the only one migrating the
+      # schema and running celery beat. The shared services live here too.
+      superset-node1:
+        superset_manage_postgresql: true
+        superset_manage_valkey: true
+        superset_valkey_bind_interface: "0.0.0.0"
+        # Docker user defined networks are carved out of 172.16.0.0/12.
+        superset_db_allowed_networks:
+          - "172.16.0.0/12"
+    group_vars:
+      all:
+        superset_cluster_group: "superset"
+        # The very same secret key has to be shared by every host.
+        superset_secret_key: "moleculeClusterMoleculeCluster42!"
+        superset_public_url: "https://superset.molecule.local"
+        superset_db:
+          host: "superset-node1"
+          port: 5432
+          name: "superset"
+          user: "superset"
+          password: "moleculedbpassword"
+        superset_valkey:
+          host: "superset-node1"
+          port: 6379
+          username: ""
+          password: "moleculevalkeypassword"
+          tls: false
+          db_celery: 0
+          db_results: 1
+          db_cache: 2
+          db_ratelimit: 3
+        superset_admin:
+          username: "admin"
+          firstname: "Molecule"
+          lastname: "Admin"
+          email: "admin@molecule.local"
+          password: "moleculeadminpassword"
+        superset_gunicorn:
+          workers: 2
+          worker_class: "gevent"
+          worker_connections: 200
+          timeout: 120
+          keepalive: 2
+          limit_request_line: 0
+          limit_request_field_size: 0
+        superset_celery:
+          enabled: true
+          pool: "prefork"
+          concurrency: 1
+          loglevel: "INFO"
+          worker_prefetch_multiplier: 1
+verifier:
+  name: ansible

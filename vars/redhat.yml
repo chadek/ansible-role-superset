@@ -1,0 +1,28 @@
+---
+# RHEL family build and runtime dependencies for the superset virtualenv.
+superset_os_packages:
+  - gcc
+  - gcc-c++
+  - make
+  - pkgconf-pkg-config
+  - openssl-devel
+  - libffi-devel
+  - cyrus-sasl-devel
+  - openldap-devel
+  - libpq-devel
+  - libxml2-devel
+  - libxslt-devel
+  - python3-devel
+  - python3-pip
+
+# Local valkey instance, only used when superset_manage_valkey is true. The
+# package is in AppStream on RHEL 10 and in EPEL on RHEL 9.
+superset_valkey_packages:
+  - valkey
+
+superset_valkey_service: valkey
+superset_valkey_config_file: /etc/valkey/valkey.conf
+superset_valkey_config_group: valkey
+superset_valkey_data_dir: /var/lib/valkey
+superset_valkey_log_file: /var/log/valkey/valkey.log
+superset_valkey_pid_file: /run/valkey/valkey.pid

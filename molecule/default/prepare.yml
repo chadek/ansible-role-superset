@@ -1,0 +1,23 @@
+---
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 600
+      when: ansible_os_family == 'Debian'
+      changed_when: false
+
+    - name: Install packages needed by the test harness
+      ansible.builtin.package:
+        name:
+          - acl
+          - ca-certificates
+          - curl
+          - iproute2
+          - procps
+        state: present

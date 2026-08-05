@@ -1,0 +1,244 @@
+---
+# vars file for ansible-role-superset
+# Internal values, they are not meant to be overridden.
+
+##############################################################################
+# Metadata database URI
+#
+# Either superset_db_url (the connection string of a managed service) or the
+# superset_db fields are used. SQLAlchemy needs an explicit driver, so both
+# postgres:// and bare postgresql:// are rewritten to postgresql+psycopg2://.
+# The netloc and the path of a provided URL are reused verbatim, so an already
+# percent encoded password is never encoded twice.
+##############################################################################
+_superset_db_url_given: "{{ (superset_db_url | default('')) | length > 0 }}"
+
+_superset_db_netloc: >-
+  {{ (superset_db_url | urlsplit('netloc')) if (_superset_db_url_given | bool)
+     else ((superset_db.user | urlencode) ~ ':' ~ (superset_db.password | urlencode)
+           ~ '@' ~ superset_db.host ~ ':' ~ superset_db.port) }}
+
+_superset_db_path: >-
+  {{ ((superset_db_url | urlsplit('path')) | regex_replace('^/', '')) if (_superset_db_url_given | bool)
+     else superset_db.name }}
+
+_superset_db_given_query: "{{ (superset_db_url | urlsplit('query')) if (_superset_db_url_given | bool) else '' }}"
+
+# Defaulted rather than read straight from superset_db: overriding that whole
+# dict is the documented style, and ansible replaces dicts instead of merging
+# them, so a definition written before these keys existed must keep working.
+_superset_db_sslmode: "{{ superset_db.sslmode | default('prefer') }}"
+_superset_db_ca_cert: "{{ superset_db.ca_cert | default('') }}"
+
+# Query kept as provided when it already carries an sslmode, completed from the
+# superset_db fields otherwise. select drops the members that stayed empty.
+_superset_db_query: >-
+  {{ ([_superset_db_given_query] if ('sslmode=' in _superset_db_given_query)
+      else [_superset_db_given_query, 'sslmode=' ~ _superset_db_sslmode,
+            ('sslrootcert=' ~ _superset_db_ca_cert) if ((_superset_db_ca_cert | length) > 0) else ''])
+     | select | join('&') }}
+
+superset_sqlalchemy_uri: >-
+  postgresql+psycopg2://{{ _superset_db_netloc }}/{{ _superset_db_path }}?{{ _superset_db_query }}
+
+# Host and port actually used, whichever way they were provided.
+superset_db_host: "{{ (superset_db_url | urlsplit('hostname')) if (_superset_db_url_given | bool) else superset_db.host }}"
+superset_db_port: >-
+  {{ ((superset_db_url | urlsplit('port')) or 5432)
+     if (_superset_db_url_given | bool) else superset_db.port }}
+
+##############################################################################
+# Valkey connection URLs
+#
+# Either superset_valkey_url (the connection string of a managed service) or the
+# superset_valkey fields are used. The scheme is always normalised to redis:// or
+# rediss://, because redis-py and kombu know no valkey:// transport: OVHcloud
+# valkeys:// URLs are rewritten, the protocol is identical. Here too the netloc
+# of a provided URL is reused verbatim.
+##############################################################################
+_superset_valkey_url_given: "{{ (superset_valkey_url | default('')) | length > 0 }}"
+
+# TLS served by the instance this role installs, as opposed to TLS offered by an
+# endpoint it does not manage.
+_superset_valkey_tls_local: "{{ (superset_manage_valkey | bool) and (superset_manage_valkey_tls | bool) }}"
+
+_superset_valkey_tls: >-
+  {{ (_superset_valkey_tls_local | bool)
+     or (((superset_valkey_url | urlsplit('scheme')) in ['rediss', 'valkeys'])
+         if (_superset_valkey_url_given | bool)
+         else (superset_valkey.tls | default(false) | bool)) }}
+
+_superset_valkey_auth: >-
+  {{ ((superset_valkey.username | default('') | urlencode) ~ ':' ~ (superset_valkey.password | urlencode) ~ '@')
+     if ((superset_valkey.password | default('')) | length > 0) else '' }}
+
+_superset_valkey_netloc: >-
+  {{ (superset_valkey_url | urlsplit('netloc')) if (_superset_valkey_url_given | bool)
+     else (_superset_valkey_auth ~ superset_valkey.host ~ ':' ~ superset_valkey.port) }}
+
+# The superset processes read the CA, not root and not valkey: /etc/valkey is
+# 0770 valkey:valkey on Debian and Ubuntu, so the CA of the local instance is
+# copied into the superset configuration directory (0750 root:superset) and it is
+# that copy the URLs point at. A CA handed out by a managed service is used where
+# the operator put it, and configure.yml checks it is reachable from there.
+superset_valkey_ca_cert_file: "{{ superset_dir.conf }}/valkey-ca.crt"
+
+_superset_valkey_ca_cert: >-
+  {{ superset_valkey_ca_cert_file if (_superset_valkey_tls_local | bool)
+     else (superset_valkey.ca_cert | default('')) }}
+
+_superset_valkey_query: >-
+  {{ ('?' ~ (['ssl_cert_reqs=' ~ (superset_valkey.ssl_cert_reqs | default('required'))]
+             + (['ssl_ca_certs=' ~ _superset_valkey_ca_cert] if ((_superset_valkey_ca_cert | length) > 0) else []))
+            | join('&'))
+     if (_superset_valkey_tls | bool) else '' }}
+
+_superset_valkey_base: >-
+  {{ 'rediss' if (_superset_valkey_tls | bool) else 'redis' }}://{{ _superset_valkey_netloc }}
+
+superset_valkey_url_celery: "{{ _superset_valkey_base }}/{{ superset_valkey.db_celery }}{{ _superset_valkey_query }}"
+superset_valkey_url_results: "{{ _superset_valkey_base }}/{{ superset_valkey.db_results }}{{ _superset_valkey_query }}"
+superset_valkey_url_cache: "{{ _superset_valkey_base }}/{{ superset_valkey.db_cache }}{{ _superset_valkey_query }}"
+superset_valkey_url_ratelimit: "{{ _superset_valkey_base }}/{{ superset_valkey.db_ratelimit }}{{ _superset_valkey_query }}"
+
+# Host and port actually used, whichever way they were provided. Used by the
+# preflight checks and by the wait_for probe.
+superset_valkey_host: >-
+  {{ (superset_valkey_url | urlsplit('hostname')) if (_superset_valkey_url_given | bool) else superset_valkey.host }}
+superset_valkey_port: >-
+  {{ ((superset_valkey_url | urlsplit('port')) or 6379)
+     if (_superset_valkey_url_given | bool) else superset_valkey.port }}
+
+# Names the certificate of the local instance has to carry. A TLS client checks
+# the certificate against the host it dialled, which is superset_valkey.host here
+# and something else on the other hosts of the cluster, hence
+# superset_valkey_tls_extra_names.
+# An address literal is an 'IP:' SAN entry, a name is a 'DNS:' one.
+_superset_ip_literal_regex: '^((\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]*:[0-9a-fA-F:]*)$'
+
+_superset_valkey_tls_san: >-
+  {{ (['DNS:localhost', 'IP:127.0.0.1', 'IP:::1', 'DNS:' ~ inventory_hostname]
+      + [((superset_valkey_host is match(_superset_ip_literal_regex)) | ternary('IP:', 'DNS:')) ~ superset_valkey_host]
+      + (['IP:' ~ superset_valkey_bind_interface]
+         if (superset_valkey_bind_interface not in ['127.0.0.1', '0.0.0.0', '::', '*']) else [])
+      + superset_valkey_tls_extra_names) | unique }}
+
+##############################################################################
+# Paths, environment and systemd units
+##############################################################################
+superset_bin: "{{ superset_dir.venv }}/bin/superset"
+superset_config_file: "{{ superset_dir.conf }}/superset_config.py"
+superset_env_file: "{{ superset_dir.conf }}/superset.env"
+
+# The virtualenv is owned by root and only readable by the superset group, so
+# the application can never rewrite its own code.
+superset_dirs_spec:
+  - { path: "{{ superset_dir.root }}", owner: "root", group: "{{ superset_user.group }}", mode: "0755" }
+  - { path: "{{ superset_dir.conf }}", owner: "root", group: "{{ superset_user.group }}", mode: "0750" }
+  - { path: "{{ superset_dir.home }}", owner: "{{ superset_user.name }}", group: "{{ superset_user.group }}", mode: "0750" }
+  - { path: "{{ superset_dir.upload }}", owner: "{{ superset_user.name }}", group: "{{ superset_user.group }}", mode: "0750" }
+  - { path: "{{ superset_dir.log }}", owner: "{{ superset_user.name }}", group: "{{ superset_user.group }}", mode: "0755" }
+
+superset_pip_extra_args: >-
+  {{ ('--constraint ' ~ superset_pip_constraints) if (superset_pip_constraints | default('') | length > 0) else '' }}
+
+# Environment shared by the superset CLI and by every systemd unit, extended
+# with superset_environment.
+superset_environment_full: >-
+  {{ {'SUPERSET_CONFIG_PATH': superset_config_file,
+      'SUPERSET_HOME': superset_dir.home,
+      'PYTHONPATH': superset_dir.conf,
+      'FLASK_APP': 'superset',
+      'PATH': superset_dir.venv ~ '/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'}
+     | combine(superset_environment) }}
+
+# The three units come from a single template: they only differ by their
+# description, what they wait for, the command they run and how long they are
+# given to stop.
+superset_units:
+  - name: superset
+    description: Apache Superset (https://superset.apache.org)
+    after: network-online.target
+    exec_start: >-
+      {{ superset_dir.venv }}/bin/gunicorn
+      --config {{ superset_dir.conf }}/gunicorn.conf.py "superset.app:create_app()"
+    exec_reload: /bin/kill -s HUP $MAINPID
+    stop_timeout: 30
+  - name: superset-worker
+    description: Apache Superset celery worker
+    after: network-online.target superset.service
+    exec_start: >-
+      {{ superset_dir.venv }}/bin/celery --app=superset.tasks.celery_app:app worker
+      --pool={{ superset_celery.pool }} --concurrency={{ superset_celery.concurrency }}
+      --loglevel={{ superset_celery.loglevel }} -O fair
+    stop_timeout: 60
+  - name: superset-beat
+    description: Apache Superset celery beat scheduler
+    after: network-online.target superset-worker.service
+    exec_start: >-
+      {{ superset_dir.venv }}/bin/celery --app=superset.tasks.celery_app:app beat
+      --loglevel={{ superset_celery.loglevel }}
+      --schedule={{ superset_dir.home }}/celerybeat-schedule --pidfile=
+    stop_timeout: 30
+
+# Units this host has to run. The others are deployed all the same, then stopped
+# and disabled, so that a host losing its primary role is cleaned up. A single
+# beat instance is allowed per cluster, otherwise scheduled reports and cache
+# warm-ups are fired several times.
+superset_active_services: >-
+  {{ ['superset']
+     + (['superset-worker'] if (superset_celery.enabled | bool) else [])
+     + (['superset-beat'] if ((superset_celery.enabled | bool) and (superset_is_primary | bool)) else []) }}
+
+##############################################################################
+# geerlingguy.postgresql variables, the whole configuration handed to that role.
+# They must live in vars/ otherwise its own defaults win over them.
+##############################################################################
+postgresql_databases:
+  - name: "{{ superset_db.name }}"
+    owner: "{{ superset_db.user }}"
+    state: present
+
+postgresql_users:
+  - name: "{{ superset_db.user }}"
+    password: "{{ superset_db.password }}"
+    db: "{{ superset_db.name }}"
+    state: present
+
+postgresql_privs:
+  - db: "{{ superset_db.name }}"
+    roles: "{{ superset_db.user }}"
+    privs: ALL
+    type: schema
+    objs: public
+    state: present
+
+postgresql_global_config_options:
+  - option: unix_socket_directories
+    value: '{{ postgresql_unix_socket_directories | join(",") }}'
+  - option: log_directory
+    value: "log"
+  - option: listen_addresses
+    value: "{{ '*' if superset_db_allowed_networks | length > 0 else 'localhost' }}"
+
+postgresql_auth_method: "{{ superset_db_auth_method }}"
+
+# Local entries, plus one per CIDR of superset_db_allowed_networks so that the
+# other superset hosts of the cluster can reach the metadata database.
+_superset_hba_remote: |
+  {% for network in superset_db_allowed_networks %}
+  - type: host
+    database: "{{ superset_db.name }}"
+    user: "{{ superset_db.user }}"
+    address: "{{ network }}"
+    auth_method: "{{ superset_db_auth_method }}"
+  {% endfor %}
+
+postgresql_hba_entries: >-
+  {{ [{'type': 'local', 'database': 'all', 'user': 'postgres', 'auth_method': 'peer'},
+      {'type': 'local', 'database': 'all', 'user': 'all', 'auth_method': 'peer'},
+      {'type': 'host', 'database': 'all', 'user': 'all', 'address': '127.0.0.1/32',
+       'auth_method': superset_db_auth_method},
+      {'type': 'host', 'database': 'all', 'user': 'all', 'address': '::1/128',
+       'auth_method': superset_db_auth_method}]
+     + (_superset_hba_remote | from_yaml | default([], true)) }}
