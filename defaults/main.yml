@@ -147,6 +147,23 @@ superset_valkey:
   db_cache: 2
   db_ratelimit: 3
 
+# Prefix of every key the superset stack writes in valkey: the four caches, the
+# SQL Lab results backend, the celery broker and result backend, and the rate
+# limiter. A managed instance usually hands out an ACL user restricted to a key
+# pattern, and nothing works until the keys match it — set this to the pattern
+# without its wildcard:
+#
+#   # ACL user superset-stage, keys superset:stage:*, commands +@all
+#   superset_valkey_key_prefix: "superset:stage:"
+#
+# It is also what keeps two instances (stage and production, say) from colliding
+# on a service exposing a single logical database.
+#
+# Ends with a separator on purpose: the value is prepended as it stands. Changing
+# it on a running instance empties the caches and hides whatever celery still has
+# queued (the workers stop reading the old keys), so drain the workers first.
+superset_valkey_key_prefix: "superset:"
+
 # Alternatively paste the connection string of the managed service and forget
 # the fields above (except ca_cert, which no URL carries). An OVHcloud
 # valkeys:// URL is normalised to rediss:// automatically.

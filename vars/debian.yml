@@ -7,7 +7,14 @@ superset_os_packages:
   - libffi-dev
   - libsasl2-dev
   - libldap2-dev
-  - libpq-dev
+  # libpq-dev is deliberately absent: the default superset_pip_packages install
+  # psycopg2-binary, whose wheel carries its own libpq, so nothing in the
+  # virtualenv ever compiles against those headers. It also breaks apt on a host
+  # carrying the PGDG repository: the ansible apt module asks for the exact
+  # candidate version of every package, and 'libpq-dev=16.x' cannot be satisfied
+  # next to the libpq5 18.x that repository installs ("you have held broken
+  # packages"). Add it back, in the PGDG version, only if psycopg2 replaces
+  # psycopg2-binary in superset_pip_packages.
   - default-libmysqlclient-dev
   - libxml2-dev
   - libxslt1-dev

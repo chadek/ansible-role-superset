@@ -71,27 +71,36 @@ VALKEY_CACHE_URL = {{ superset_valkey_url_cache | to_json }}
 VALKEY_RESULTS_URL = {{ superset_valkey_url_results | to_json }}
 VALKEY_CELERY_URL = {{ superset_valkey_url_celery | to_json }}
 
+# Every key written below starts with this prefix (superset_valkey_key_prefix),
+# so an ACL user restricted to a key pattern — what a managed service hands out —
+# can be matched exactly, and two instances can share one logical database.
+VALKEY_KEY_PREFIX = {{ superset_valkey_key_prefix | to_json }}
+
 _CACHE_BASE = {
     "CACHE_TYPE": "RedisCache",
     "CACHE_REDIS_URL": VALKEY_CACHE_URL,
     "CACHE_DEFAULT_TIMEOUT": {{ superset_cache_default_timeout }},
 }
 
-CACHE_CONFIG = {**_CACHE_BASE, "CACHE_KEY_PREFIX": "superset_metadata_"}
-DATA_CACHE_CONFIG = {**_CACHE_BASE, "CACHE_KEY_PREFIX": "superset_data_"}
+CACHE_CONFIG = {**_CACHE_BASE, "CACHE_KEY_PREFIX": VALKEY_KEY_PREFIX + "cache:metadata:"}
+DATA_CACHE_CONFIG = {**_CACHE_BASE, "CACHE_KEY_PREFIX": VALKEY_KEY_PREFIX + "cache:data:"}
 FILTER_STATE_CACHE_CONFIG = {
     **_CACHE_BASE,
-    "CACHE_KEY_PREFIX": "superset_filter_",
+    "CACHE_KEY_PREFIX": VALKEY_KEY_PREFIX + "cache:filter:",
     "REFRESH_TIMEOUT_ON_RETRIEVAL": True,
 }
 EXPLORE_FORM_DATA_CACHE_CONFIG = {
     **_CACHE_BASE,
-    "CACHE_KEY_PREFIX": "superset_explore_",
+    "CACHE_KEY_PREFIX": VALKEY_KEY_PREFIX + "cache:explore:",
     "REFRESH_TIMEOUT_ON_RETRIEVAL": True,
 }
 
 # Flask-Limiter must not use its in-memory backend on a multi node setup.
+# Flask-Appbuilder builds the Limiter without a key prefix, so this config key is
+# what it picks up. Flask-Limiter joins the key parts with '/', hence no trailing
+# separator here.
 RATELIMIT_STORAGE_URI = {{ superset_valkey_url_ratelimit | to_json }}
+RATELIMIT_KEY_PREFIX = VALKEY_KEY_PREFIX + "ratelimit"
 
 ##############################################################################
 # Celery: async SQL Lab queries, cache warm-up, alerts and reports
@@ -100,6 +109,15 @@ RATELIMIT_STORAGE_URI = {{ superset_valkey_url_ratelimit | to_json }}
 class CeleryConfig:
     broker_url = VALKEY_CELERY_URL
     result_backend = VALKEY_CELERY_URL
+    # Neither celery nor kombu prefixes anything by default: the queues, the
+    # bindings, the unacked sets and the celery-task-meta-* keys all sit at the
+    # root of the database. These two options are what moves them under
+    # VALKEY_KEY_PREFIX — kombu prefixes the broker keys (and the fanout channel
+    # names with them), celery prefixes the result keys.
+    broker_transport_options = {"global_keyprefix": VALKEY_KEY_PREFIX + "celery:"}
+    result_backend_transport_options = {
+        "global_keyprefix": VALKEY_KEY_PREFIX + "celery:"
+    }
     broker_connection_retry_on_startup = True
     imports = (
         "superset.sql_lab",
@@ -130,7 +148,7 @@ CELERY_CONFIG = CeleryConfig
 # a client is the only way to carry TLS and ACL settings from the URL.
 RESULTS_BACKEND = RedisCache(
     host=redis.Redis.from_url(VALKEY_RESULTS_URL),
-    key_prefix="superset_results",
+    key_prefix=VALKEY_KEY_PREFIX + "results:",
 )
 {% else %}
 CELERY_CONFIG = None

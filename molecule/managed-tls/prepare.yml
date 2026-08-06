@@ -100,8 +100,15 @@
           save ""
           logfile /var/log/valkey/valkey-server.log
           dir /var/lib/valkey
+          # A user restricted to one key pattern, which is what a managed service
+          # hands out, and every channel denied unless it matches the same
+          # pattern (the valkey default, spelled out so the test cannot be
+          # weakened by a change of default). The whole superset stack has to fit
+          # under superset_valkey_key_prefix for this to work: the caches, the
+          # results backend, the celery queues and the celery result keys.
+          acl-pubsub-default resetchannels
           user default off
-          user {{ superset_managed_user }} on >{{ superset_managed_password }} ~* &* +@all
+          user {{ superset_managed_user }} on >{{ superset_managed_password }} ~{{ superset_managed_key_prefix }}* &{{ superset_managed_key_prefix }}* +@all
       notify: Restart valkey
 
     # ------------------------------------------------------------- postgresql

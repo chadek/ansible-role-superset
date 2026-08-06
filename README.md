@@ -42,7 +42,19 @@ Requirements
   ```yaml
   superset_python_ppa: "ppa:canonical-python-maintainers/python-backports"
   superset_python_interpreter: "python3.12"
+  # only needed together with superset_manage_postgresql, see below
+  ansible_python_interpreter: /usr/bin/python3
   ```
+
+  That last line is not cosmetic. Installing `python3.12` changes what Ansible
+  discovers for **its own** modules: `/usr/bin/python3.12` outranks
+  `/usr/bin/python3` in the interpreter fallback list, and `python3-psycopg2` is
+  installed for the system interpreter (3.14), so from the second run on every
+  `community.postgresql` module fails with `Failed to import the required Python
+  library (psycopg2) on <host>'s Python /usr/bin/python3.12`. Pinning
+  `ansible_python_interpreter` keeps the modules on the system python;
+  `superset_python_interpreter` is unaffected, it only builds the virtualenv.
+  Nothing to do when the metadata database is a managed service.
 
   A virtualenv does not help here: `python -m venv` reuses the very interpreter
   that created it, so it isolates site-packages, not the runtime. The C
@@ -126,6 +138,9 @@ superset_valkey:
   db_results: 1
   db_cache: 2
   db_ratelimit: 3
+# prefix of every valkey key, set it to the pattern an ACL restricted user of a
+# managed service is allowed ("superset:stage:*" -> "superset:stage:")
+superset_valkey_key_prefix: "superset:"
 superset_admin:
   username: "admin"
   firstname: "Superset"
@@ -269,17 +284,48 @@ superset_valkey:
   db_ratelimit: 0
 ```
 
-Three traps, all of which the role handles or checks:
+Four traps, all of which the role handles or checks:
 
 * **The URL scheme must be `redis://` / `rediss://`.** OVHcloud hands out
   `valkeys://…`, and neither `redis-py` nor `kombu` registers a `valkey://`
   transport — celery cannot resolve it and the worker refuses to start. The role
   rewrites `valkeys://` to `rediss://` (and `valkey://` to `redis://`)
   automatically, so the provider string can be pasted verbatim.
+* **An ACL user restricted to a key pattern needs
+  `superset_valkey_key_prefix`.** Providers hand out a user (`superset-stage`,
+  `+@all`) allowed to touch keys matching `superset:stage:*` and nothing else.
+  Out of the box nothing here honours that: flask-caching writes
+  `superset_data_…`, kombu puts the queues, the `_kombu.binding.*` bindings and
+  the `unacked*` sets at the root of the database, celery writes
+  `celery-task-meta-*` and flask-limiter `LIMITER/…`, so every command comes back
+  `NOPERM this user has no permissions to access one of the keys` — the services
+  start and the first dashboard, query or scheduled report fails. Set the prefix
+  to the pattern without its wildcard:
+
+  ```yaml
+  superset_valkey_key_prefix: "superset:stage:"
+  ```
+
+  Everything then lands under it: `superset:stage:cache:{metadata,data,filter,explore}:…`
+  for the four caches, `superset:stage:results:…` for the SQL Lab results
+  backend, `superset:stage:ratelimit/…` for flask-limiter, and
+  `superset:stage:celery:*` for both the broker (kombu's `global_keyprefix`
+  broker transport option, which covers the queues, the bindings and the unacked
+  sets) and the `celery-task-meta-*` keys (the same option on
+  `result_backend_transport_options`).
+
+  Two things worth asking the provider about, because that pattern has to cover
+  them too. **Pub/sub channels:** the celery worker subscribes to its remote
+  control pidbox and the result backend `PUBLISH`es every result it stores, on
+  channel names carrying the same prefix — so the ACL also needs
+  `&superset:stage:*`, and Valkey denies every channel by default
+  (`acl-pubsub-default resetchannels`). **`EXISTS`:** kombu prefixes the commands
+  of the publish, consume and ack paths but not that one, so a passive queue
+  declare (`celery inspect active_queues`, `celery purge`) probes an unprefixed
+  key and answers `NOPERM`. Tasks are unaffected.
 * **Only `db 0` on some services.** Setting the four `db_*` to `0` is safe: the
-  caches and the results backend already use distinct key prefixes
-  (`superset_metadata_`, `superset_data_`, `superset_filter_`,
-  `superset_explore_`, `superset_results`).
+  caches, the results backend, the broker and the rate limiter all live under
+  distinct prefixes below `superset_valkey_key_prefix`.
 * **The eviction policy must be `noeviction`.** Managed caching offerings often
   default to, or recommend, `allkeys-lru`; since the policy is instance wide,
   LRU eviction can silently drop queued celery tasks (scheduled reports, async

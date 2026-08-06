@@ -113,6 +113,20 @@
       changed_when: false
       failed_when: "'PLAINTEXT-REFUSED' not in _pg_plain.stdout"
 
+    - name: Verify | Superset scheduled a celery task through the restricted broker
+      ansible.builtin.command:
+        argv:
+          - /opt/superset/venv/bin/python
+          - -c
+          - |
+            from superset.tasks.celery_app import app
+            r = app.send_task("reports.scheduler")
+            print("task-sent=%s" % bool(r.id))
+      environment: "{{ superset_env }}"
+      register: _celery_send
+      changed_when: false
+      failed_when: "'task-sent=True' not in _celery_send.stdout"
+
     - name: Verify | The metadata schema was created on the remote database
       ansible.builtin.command:
         argv:
@@ -132,3 +146,65 @@
       register: _pg_schema
       changed_when: false
       failed_when: "'dashboards=1' not in _pg_schema.stdout"
+
+# Every task above went through an ACL user confined to superset:stage:*, so it
+# has already proven the stack never touches a key outside that pattern: a
+# misprefixed key would have been refused with NOPERM, not written elsewhere.
+# What is left to check is that the writes really happened, under the prefix, for
+# each subsystem — a silently disabled cache would pass the probes too.
+- name: Verify | The keys written by superset all sit under the allowed pattern
+  hosts: superset_data
+  become: true
+  gather_facts: false
+
+  tasks:
+    # KEYS declares no key, so the ACL does not filter its output: whatever was
+    # written to the database shows up here, prefixed or not.
+    - name: Verify | List every key of the fake managed valkey
+      ansible.builtin.command:
+        argv:
+          - valkey-cli
+          - --tls
+          - --cacert
+          - /etc/superset-molecule-tls/ca.crt
+          - -h
+          - superset-data
+          - -p
+          - "6379"
+          - --user
+          - "{{ superset_managed_user }}"
+          - --pass
+          - "{{ superset_managed_password }}"
+          - --no-auth-warning
+          - KEYS
+          - "*"
+      register: _valkey_keys
+      changed_when: false
+
+    - name: Verify | No key escaped superset_valkey_key_prefix
+      ansible.builtin.assert:
+        that:
+          - _keys | length > 0
+          - _outside | length == 0
+        fail_msg: >-
+          {{ _outside | length }} key(s) written outside
+          {{ superset_managed_key_prefix }}*: {{ _outside | join(', ') }}
+        success_msg: >-
+          {{ _keys | length }} key(s), all under {{ superset_managed_key_prefix }}
+      vars:
+        _keys: "{{ _valkey_keys.stdout_lines }}"
+        _outside: "{{ _valkey_keys.stdout_lines | reject('match', superset_managed_key_prefix) | list }}"
+
+    # The caches, the SQL Lab results backend and the celery broker each write
+    # under their own subprefix: none of them is silently bypassed.
+    - name: Verify | Each subsystem wrote under its own subprefix
+      ansible.builtin.assert:
+        that:
+          - _valkey_keys.stdout_lines | select('match', superset_managed_key_prefix ~ item) | list | length > 0
+        fail_msg: >-
+          no key matching {{ superset_managed_key_prefix }}{{ item }}*, so that
+          part of the stack never reached valkey
+      loop:
+        - "cache:"
+        - "results:"
+        - "celery:"

@@ -55,6 +55,12 @@ provisioner:
         superset_cluster_group: "superset_ubuntu2604"
         superset_python_ppa: "ppa:canonical-python-maintainers/python-backports"
         superset_python_interpreter: "python3.12"
+        # Installing that interpreter changes what ansible discovers for its own
+        # modules: /usr/bin/python3.12 outranks /usr/bin/python3 in the
+        # interpreter fallback list, and python3-psycopg2 belongs to the system
+        # python, so every postgresql module breaks on the second run. Pin the
+        # module interpreter; superset_python_interpreter still builds the venv.
+        ansible_python_interpreter: /usr/bin/python3
     group_vars:
       all:
         superset_secret_key: "moleculeMoleculeMoleculeMolecule42"
