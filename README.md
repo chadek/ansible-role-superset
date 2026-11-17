@@ -35,13 +35,15 @@ Requirements
 * A Debian or Ubuntu target with a python 3.10 → 3.12 interpreter available.
   Debian 12 ships 3.11 and Ubuntu 24.04 ships 3.12, both fine as they are.
   **Ubuntu 26.04 ships python 3.14**, which apache-superset 6.x does not support
-  (it also caps `greenlet` to 3.1.1, which has no wheel for it): add the
-  Canonical backports PPA and select a supported interpreter, which is checked
-  before the virtualenv is built.
+  (it also caps `greenlet` to 3.1.1, which has no wheel for it). On Ubuntu 26.04
+  and later the role therefore adds the Canonical backports PPA and builds the
+  virtualenv with `python3.12` by default (`superset_python_ppa` and
+  `superset_python_interpreter`), checked before the virtualenv is built. Do not
+  set `superset_python_interpreter: python3` in the inventory there, it forces
+  the system python and fails that check. To use another interpreter, set both
+  variables (an empty `superset_python_ppa` adds no PPA).
 
   ```yaml
-  superset_python_ppa: "ppa:canonical-python-maintainers/python-backports"
-  superset_python_interpreter: "python3.12"
   # only needed together with superset_manage_postgresql, see below
   ansible_python_interpreter: /usr/bin/python3
   ```
@@ -119,7 +121,7 @@ Everything lives in `defaults/main.yml`, the most useful ones being:
 superset_cluster_group: "superset"
 
 superset_version: "6.1.0"
-superset_python_interpreter: "python3"
+# superset_python_interpreter: python3.12   # default on Ubuntu 26.04, python3 elsewhere
 
 # secrets, put them in an ansible-vault
 superset_secret_key: "{{ vault_superset_secret_key | default('') }}"
@@ -458,9 +460,9 @@ molecule test -s managed-tls
 ```
 
 The `default` scenario runs three platforms in parallel: Debian 12, Ubuntu 24.04
-and Ubuntu 26.04. The 26.04 one carries `superset_python_ppa` and
-`superset_python_interpreter: python3.12`, so the interpreter workaround is
-covered by the tests and not only by this README. Debian 12 covers the
+and Ubuntu 26.04. The 26.04 one relies on the defaults of `superset_python_ppa` and
+`superset_python_interpreter` (python3.12 from the backports PPA), so that
+behaviour is covered by the tests and not only by this README. Debian 12 covers the
 `bookworm-backports` path of the Valkey install.
 
 `default` checks that the three Superset units and Valkey run, that `/health` and the login
